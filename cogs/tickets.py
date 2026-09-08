@@ -97,7 +97,7 @@ class SupportModal(discord.ui.Modal, title="General Support"):
 
 
 # ---------------------------------------------------------------------------
-# MENIUL DE SELECȚIE PENTRU RECUREZĂ (DENY REASONS DROPDOWN)
+# DENY REASONS DROPDOWN
 # ---------------------------------------------------------------------------
 
 class DenyReasonSelect(discord.ui.Select):
@@ -111,7 +111,6 @@ class DenyReasonSelect(discord.ui.Select):
         super().__init__(placeholder="Select a deny reason", min_values=1, max_values=1, options=options, custom_id="mythral_deny_select")
 
     async def callback(self, interaction: discord.Interaction):
-        # Doar staff-ul poate folosi acest dropdown
         staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
         if staff_role not in interaction.user.roles:
             await interaction.response.send_message("❌ Only staff can select the reason.", ephemeral=True)
@@ -120,7 +119,6 @@ class DenyReasonSelect(discord.ui.Select):
         reason = self.values[0]
         await interaction.response.send_message(f"🔒 Ticket denied. Reason: **{reason}**. Archiving...", ephemeral=True)
         
-        # Trimite un mesaj public în canal cu motivul înainte de arhivare
         embed_reason = discord.Embed(
             title="Ticket Denied",
             description=f"This ticket has been rejected by the administration.\n**Reason:** {reason}",
@@ -128,7 +126,6 @@ class DenyReasonSelect(discord.ui.Select):
         )
         await interaction.channel.send(embed=embed_reason)
         
-        # Procesul de arhivare
         await interaction.channel.set_permissions(interaction.guild.default_role, view_channel=False)
         archive_category = interaction.guild.get_channel(1544151748900425829)
         if archive_category:
@@ -136,14 +133,13 @@ class DenyReasonSelect(discord.ui.Select):
 
 
 class DenyReasonView(discord.ui.View):
-    """View-ul efemer care conține dropdown-ul."""
     def __init__(self):
         super().__init__(timeout=60)
         self.add_item(DenyReasonSelect())
 
 
 # ---------------------------------------------------------------------------
-# VIEWS PENTRU PANOURI
+# VIEWS FOR PANELS
 # ---------------------------------------------------------------------------
 
 class NewTicketActionsView(discord.ui.View):
@@ -161,7 +157,6 @@ class NewTicketActionsView(discord.ui.View):
             await interaction.response.send_message("❌ Only staff can deny/close this ticket.", ephemeral=True)
             return
         
-        # În loc să închidem direct, generăm caseta efemeră "What went wrong?" cu meniul
         embed = discord.Embed(
             title="What went wrong?",
             description="Select a reason that explains your reason for denying the ticket.",
@@ -178,8 +173,6 @@ class NewTicketActionsView(discord.ui.View):
 
 
 class TicketPanelView(discord.ui.View):
-    """Persistent view with the 3 buttons in #ticket-creation."""
-
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -213,18 +206,64 @@ class TicketPanelView(discord.ui.View):
 # ---------------------------------------------------------------------------
 
 async def get_open_ticket(user_id: int, guild_id: int):
-    """Checks if the user already has an open ticket to prevent duplicates."""
     async with get_db() as db:
         cursor = await db.execute(
             "SELECT channel_id FROM tickets WHERE owner_id = ? AND status = 'open'",
             (user_id,),
         )
         row = await cursor.fetchone()
-        return row if row else None
+        return row[0] if row else None
 
 
 async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str, fields: list[tuple[str, str]]):
     guild = interaction.guild
+    category = guild.get_channel(config.TICKET_CATEGORY_ID)
+    emoji, label = TICKET_TYPES[ticket_type]
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    staff_role = guild.get_role(config.STAFF_ROLE_ID)
+    if staff_role:    overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    
+    freelancer_role = guild.get_role(1544135641275568158)
+    if freelancer_role:
+        overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+    channel = await guild.create_text_channel(
+        name=f"{ticket_type}-{str(interaction.id)[-4:]}",
+        category=category,
+        overwrites=overwrites,
+    )
+
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO tickets (channel_id, owner_id, ticket_type) VALUES (?, ?, ?)",
+            (channel.id, interaction.user.id, ticket_type),
+        )
+        await db.commit()
+
+    embed = discord.Embed(
+        title="Information",
+        color=discord.Color.green()
+    )
+    for name, value in fields:
+        embed.add_field(name=name, value=value or "—", inline=False)
+        
+    embed.add_field(name="Rating", value="⭐⭐⭐⭐⭐ (0)", inline=False)
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = interaction.created_at
+
+    ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
+    await channel.send(content=ping, embed=embed, view=NewTicketActionsView())
+    await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# COG REGISTRATION & SLASH COMMAND DEFINITION
+# ---------------------------------------------------------------------------
 
 class Tickets(commands.Cog):
     def __init__(self, bot):
@@ -235,5 +274,19 @@ class Tickets(commands.Cog):
         self.bot.add_view(TicketPanelView())
         self.bot.add_view(NewTicketActionsView())
 
+    @app_commands.command(name="ticket-panel", description="Spawns the ticket creation panel")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ticket_panel(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🎫 Ticket Center",
+            description="Welcome to our ticket center. Here you can open a ticket to request a quote, get support for a product, or apply to work with us.",
+            color=config.COLOR_MAIN
+        )
+        embed.set_footer(text=config.STUDIO_FOOTER)
+        
+        await interaction.response.send_message("Sending ticket panel...", ephemeral=True)
+        await interaction.channel.send(embed=embed, view=TicketPanelView())
+
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
+
