@@ -226,7 +226,8 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
     staff_role = guild.get_role(config.STAFF_ROLE_ID)
-    if staff_role:    overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
     
     freelancer_role = guild.get_role(1544135641275568158)
     if freelancer_role:
@@ -289,4 +290,3 @@ class Tickets(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
-
