@@ -96,42 +96,6 @@ class SupportModal(discord.ui.Modal, title="General Support"):
         await create_ticket_channel(interaction, "support", fields)
 
 
-# ---------------------------------------------------------------------------
-# DENY REASONS DROPDOWN
-# ---------------------------------------------------------------------------
-
-class DenyReasonSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Won't fit in the deadline", description="The deadline is too short for our freelancers.", emoji="⏳"),
-            discord.SelectOption(label="Not interested", description="Our freelancers are not interested in this project.", emoji="❌"),
-            discord.SelectOption(label="Not my niche", description="This project is outside of our studio's expertise.", emoji="🎨"),
-            discord.SelectOption(label="Budget", description="The budget is too low for the requested work.", emoji="💰"),
-        ]
-        super().__init__(placeholder="Select a deny reason", min_values=1, max_values=1, options=options, custom_id="mythral_deny_select")
-
-    async def callback(self, interaction: discord.Interaction):
-        freelancer_role = interaction.guild.get_role(1544135641275568158)
-        if freelancer_role not in interaction.user.roles:
-            await interaction.response.send_message("❌ Only freelancers can select the deny reason.", ephemeral=True)
-            return
-
-        reason = self.values[0]
-        await interaction.response.send_message(f"🔒 Ticket denied. Reason: **{reason}**. Archiving...", ephemeral=True)
-        
-        embed_reason = discord.Embed(
-            title="Ticket Denied",
-            description=f"This ticket has been rejected by the administration.\n**Reason:** {reason}",
-            color=discord.Color.red()
-        )
-        await interaction.channel.send(embed=embed_reason)
-        
-        await interaction.channel.set_permissions(interaction.guild.default_role, view_channel=False)
-        archive_category = interaction.guild.get_channel(1544151748900425829)
-        if archive_category:
-            await interaction.channel.edit(category=archive_category, name=f"closed-{interaction.channel.name[-4:]}")
-
-
 class QuotePriceModal(discord.ui.Modal, title="Quote"):
     amount = discord.ui.TextInput(
         label="Amount",
@@ -170,6 +134,42 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
         await interaction.response.send_message(embed=embed)
 
 
+# ---------------------------------------------------------------------------
+# DENY REASONS DROPDOWN (Exclusive for Freelancers)
+# ---------------------------------------------------------------------------
+
+class DenyReasonSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Won't fit in the deadline", description="The deadline is too short for our freelancers.", emoji="⏳"),
+            discord.SelectOption(label="Not interested", description="Our freelancers are not interested in this project.", emoji="❌"),
+            discord.SelectOption(label="Not my niche", description="This project is outside of our studio's expertise.", emoji="🎨"),
+            discord.SelectOption(label="Budget", description="The budget is too low for the requested work.", emoji="💰"),
+        ]
+        super().__init__(placeholder="Select a deny reason", min_values=1, max_values=1, options=options, custom_id="mythral_deny_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        freelancer_role = interaction.guild.get_role(1544135641275568158)
+        if freelancer_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Only freelancers can select the deny reason.", ephemeral=True)
+            return
+
+        reason = self.values[0]
+        await interaction.response.send_message(f"🔒 Ticket denied. Reason: **{reason}**. Archiving...", ephemeral=True)
+        
+        embed_reason = discord.Embed(
+            title="Ticket Denied",
+            description=f"This ticket has been rejected by the freelancers.\n**Reason:** {reason}",
+            color=discord.Color.red()
+        )
+        await interaction.channel.send(embed=embed_reason)
+        
+        await interaction.channel.set_permissions(interaction.guild.default_role, view_channel=False)
+        archive_category = interaction.guild.get_channel(1544151748900425829)
+        if archive_category:
+            await interaction.channel.edit(category=archive_category, name=f"closed-{interaction.channel.name[-4:]}")
+
+
 class DenyReasonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
@@ -177,7 +177,7 @@ class DenyReasonView(discord.ui.View):
 
 
 # ---------------------------------------------------------------------------
-# VIEWS FOR PANELS
+# VIEWS FOR PANELS (Exclusive for Freelancers)
 # ---------------------------------------------------------------------------
 
 class NewTicketActionsView(discord.ui.View):
@@ -186,13 +186,17 @@ class NewTicketActionsView(discord.ui.View):
 
     @discord.ui.button(label="Quote", style=discord.ButtonStyle.success, custom_id="mythral_action_quote")
     async def quote_action(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("💡 Feature matching this button will be triggered here.", ephemeral=True)
+        freelancer_role = interaction.guild.get_role(1544135641275568158)
+        if freelancer_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Only freelancers can submit a quote for this ticket.", ephemeral=True)
+            return
+        await interaction.response.send_modal(QuotePriceModal())
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, custom_id="mythral_action_deny")
     async def deny_action(self, interaction: discord.Interaction, button: discord.ui.Button):
-        staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
-        if staff_role not in interaction.user.roles:
-            await interaction.response.send_message("❌ Only staff can deny/close this ticket.", ephemeral=True)
+        freelancer_role = interaction.guild.get_role(1544135641275568158)
+        if freelancer_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Only freelancers can use the Deny button for this ticket.", ephemeral=True)
             return
         
         embed = discord.Embed(
@@ -229,8 +233,7 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(ApplyModal())
-
-    @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary, emoji="🎧", custom_id="mythral_ticket_support")
+         @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary, emoji="🎧", custom_id="mythral_ticket_support")
     async def support_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
         if existing:
@@ -263,10 +266,11 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
+    
     staff_role = guild.get_role(config.STAFF_ROLE_ID)
     if staff_role:
         overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-    
+
     freelancer_role = guild.get_role(1544135641275568158)
     if freelancer_role:
         overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
@@ -326,5 +330,7 @@ class Tickets(commands.Cog):
         await interaction.response.send_message("Sending ticket panel...", ephemeral=True)
         await interaction.channel.send(embed=embed, view=TicketPanelView())
 
+
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
+
