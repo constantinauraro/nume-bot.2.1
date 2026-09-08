@@ -211,18 +211,21 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         )
         await db.commit()
 
-    embed = discord.Embed(
-        title=f"{emoji} {label}",
-        description=f"Welcome, {interaction.user.mention}! A staff member will assist you shortly.",
-        color=config.COLOR_MAIN,
+        embed = discord.Embed(
+        title="Information",
+        color=discord.Color.green()
     )
     for name, value in fields:
         embed.add_field(name=name, value=value or "—", inline=False)
+        
+    embed.add_field(name="Rating", value="⭐⭐⭐⭐⭐ (0)", inline=False)
     embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = interaction.created_at
 
-    ping = f"{staff_role.mention} — " if staff_role else ""
-    await channel.send(content=f"{ping}{interaction.user.mention}", embed=embed, view=CloseTicketView())
+    ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
+    await channel.send(content=ping, embed=embed, view=NewTicketActionsView())
     await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+
 
 
 # ---------------------------------------------------------------------------
