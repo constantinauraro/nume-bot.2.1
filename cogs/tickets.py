@@ -146,10 +146,22 @@ class CloseTicketView(discord.ui.View):
             )
             await db.commit()
 
-        await interaction.response.send_message("🔒 Tichetul va fi închis în câteva secunde...")
-        await interaction.channel.edit(name=f"closed-{interaction.channel.name}")
-        await interaction.channel.set_permissions(interaction.guild.default_role, view_channel=False)
-
+        await interaction.response.send_message("🔒 Tichetul a fost închis și este mutat în arhivă...", ephemeral=True)
+        
+        channel = interaction.channel
+        guild = interaction.guild
+        
+        # 1. Elimină complet accesul rolului @everyone din acest canal
+        await channel.set_permissions(guild.default_role, view_channel=False)
+        
+        # 2. Mută canalul în categoria ta de arhivă
+        # Schimbă numărul de mai jos cu ID-ul real al categoriei tale de arhivă din Discord
+        ARHIVA_ID = 1544151748900425829  
+        archive_category = guild.get_channel(ARHIVA_ID)
+        
+        if archive_category:
+            # Redenumește canalul într-un format anonim cu ultimele 4 caractere ale numelui vechi
+            await channel.edit(category=archive_category, name=f"closed-{channel.name[-4:]}")
 
 # ---------------------------------------------------------------------------
 # LOGICA PARTAJATA
