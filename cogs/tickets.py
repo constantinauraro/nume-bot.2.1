@@ -131,6 +131,43 @@ class DenyReasonSelect(discord.ui.Select):
         if archive_category:
             await interaction.channel.edit(category=archive_category, name=f"closed-{interaction.channel.name[-4:]}")
 
+class QuotePriceModal(discord.ui.Modal, title="Quote"):
+    amount = discord.ui.TextInput(
+        label="Amount",
+        placeholder="The amount you would like to quote. In USD",
+        max_length=50,
+        required=True
+    )
+    deadline = discord.ui.TextInput(
+        label="Deadline",
+        placeholder="e.g., 1 month 2 weeks",
+        max_length=50,
+        required=True
+    )
+    comment = discord.ui.TextInput(
+        label="Comment",
+        style=discord.TextStyle.paragraph,
+        placeholder="Anything else you would like to add",
+        max_length=1000,
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="💰 Official Project Quote",
+            description="A freelancer has submitted a price offer for this project.",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="Amount", value=str(self.amount), inline=True)
+        embed.add_field(name="Deadline", value=str(self.deadline), inline=True)
+        if self.comment.value:
+            embed.add_field(name="Comment", value=str(self.comment), inline=False)
+            
+        embed.set_footer(text=config.STUDIO_FOOTER)
+        embed.timestamp = interaction.created_at
+        
+        await interaction.response.send_message(embed=embed)
+
 
 class DenyReasonView(discord.ui.View):
     def __init__(self):
