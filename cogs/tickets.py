@@ -151,16 +151,12 @@ class CloseTicketView(discord.ui.View):
         channel = interaction.channel
         guild = interaction.guild
         
-        # 1. Elimină complet accesul rolului @everyone din acest canal
         await channel.set_permissions(guild.default_role, view_channel=False)
         
-        # 2. Mută canalul în categoria ta de arhivă
-        # Schimbă numărul de mai jos cu ID-ul real al categoriei tale de arhivă din Discord
         ARHIVA_ID = 1544151748900425829  
         archive_category = guild.get_channel(ARHIVA_ID)
         
         if archive_category:
-            # Redenumește canalul într-un format anonim cu ultimele 4 caractere ale numelui vechi
             await channel.edit(category=archive_category, name=f"closed-{channel.name[-4:]}")
 
 # ---------------------------------------------------------------------------
