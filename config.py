@@ -22,7 +22,7 @@ STUDIO_FOOTER = f"{STUDIO_NAME} • Assistant Bot"
 # Valorile de mai jos (dupa virgula) sunt folosite doar daca variabila nu e setata deloc.
 
 # Categoria unde se creeaza canalele de tichet
-TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "1544008985873490060"))
+TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "1544151748900425829"))
 
 # Canalul unde apar review-urile noi
 REVIEWS_CHANNEL_ID = int(os.getenv("REVIEWS_CHANNEL_ID", "1544008601322913972"))
