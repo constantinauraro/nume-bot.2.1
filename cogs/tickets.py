@@ -97,8 +97,33 @@ class SupportModal(discord.ui.Modal, title="General Support"):
 
 
 # ---------------------------------------------------------------------------
-# VIEWS
+# VIEWS (ORDER MATTERS: Defined first so create_ticket_channel can use them)
 # ---------------------------------------------------------------------------
+
+class NewTicketActionsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Quote", style=discord.ButtonStyle.success, custom_id="mythral_action_quote")
+    async def quote_action(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("💡 Feature matching this button will be triggered here.", ephemeral=True)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, custom_id="mythral_action_deny")
+    async def deny_action(self, interaction: discord.Interaction, button: discord.ui.Button):
+        staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
+        if staff_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Only staff can deny/close this ticket.", ephemeral=True)
+            return
+        await interaction.response.send_message("🔒 Access revoked. Archiving ticket...", ephemeral=True)
+        await interaction.channel.set_permissions(interaction.guild.default_role, view_channel=False)
+        archive_category = interaction.guild.get_channel(1544151748900425829)
+        if archive_category:
+            await interaction.channel.edit(category=archive_category, name=f"closed-{interaction.channel.name[-4:]}")
+
+    @discord.ui.button(label="Reviews", style=discord.ButtonStyle.primary, custom_id="mythral_action_reviews")
+    async def reviews_action(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("⭐ Displaying freelancer reviews...", ephemeral=True)
+
 
 class TicketPanelView(discord.ui.View):
     """Persistent view with the 3 buttons in #ticket-creation."""
@@ -131,40 +156,6 @@ class TicketPanelView(discord.ui.View):
         await interaction.response.send_modal(SupportModal())
 
 
-class CloseTicketView(discord.ui.View):
-    """Persistent view with the close button inside the ticket channel."""
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mythral_ticket_close")
-    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
-        if staff_role not in interaction.user.roles:
-            await interaction.response.send_message("❌ You do not have permission to close this ticket! Only the administrative team can do this.", ephemeral=True)
-            return
-
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET status = 'closed' WHERE channel_id = ?",
-                (interaction.channel.id,),
-            )
-            await db.commit()
-
-        await interaction.response.send_message("🔒 This ticket is now closed and is being archived...", ephemeral=True)
-        
-        channel = interaction.channel
-        guild = interaction.guild
-        
-        await channel.set_permissions(guild.default_role, view_channel=False)
-        
-        ARHIVA_ID = 1544151748900425829  
-        archive_category = guild.get_channel(ARHIVA_ID)
-        
-        if archive_category:
-            await channel.edit(category=archive_category, name=f"closed-{channel.name[-4:]}")
-
-
 # ---------------------------------------------------------------------------
 # SHARED LOGIC
 # ---------------------------------------------------------------------------
@@ -177,7 +168,7 @@ async def get_open_ticket(user_id: int, guild_id: int):
             (user_id,),
         )
         row = await cursor.fetchone()
-        return row[0] if row else None
+        return row if row else None
 
 
 async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str, fields: list[tuple[str, str]]):
@@ -211,7 +202,7 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         )
         await db.commit()
 
-        embed = discord.Embed(
+    embed = discord.Embed(
         title="Information",
         color=discord.Color.green()
     )
@@ -227,9 +218,8 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
 
 
-
 # ---------------------------------------------------------------------------
-# COG REGISTRATION - The missing part that caused the crash
+# COG REGISTRATION
 # ---------------------------------------------------------------------------
 
 class Tickets(commands.Cog):
@@ -239,7 +229,7 @@ class Tickets(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(TicketPanelView())
-        self.bot.add_view(CloseTicketView())
+        self.bot.add_view(NewTicketActionsView())
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
