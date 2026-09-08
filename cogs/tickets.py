@@ -137,9 +137,9 @@ class CloseTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mythral_ticket_close")
+        @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mythral_ticket_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-                staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
+        staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
         if staff_role not in interaction.user.roles:
             await interaction.response.send_message("❌ Nu ai permisiunea de a închide acest tichet! Doar echipa administrativă poate face asta.", ephemeral=True)
             return
@@ -158,7 +158,7 @@ class CloseTicketView(discord.ui.View):
         
         await channel.set_permissions(guild.default_role, view_channel=False)
         
-        ARHIVA_ID = 1544151814012932256  
+        ARHIVA_ID = 1544151748900425829  
         archive_category = guild.get_channel(ARHIVA_ID)
         
         if archive_category:
