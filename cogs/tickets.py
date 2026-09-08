@@ -225,3 +225,15 @@ async def get_open_ticket(user_id: int, guild_id: int):
 
 async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str, fields: list[tuple[str, str]]):
     guild = interaction.guild
+
+class Tickets(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.bot.add_view(TicketPanelView())
+        self.bot.add_view(NewTicketActionsView())
+
+async def setup(bot):
+    await bot.add_cog(Tickets(bot))
