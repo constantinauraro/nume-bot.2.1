@@ -233,10 +233,10 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(ApplyModal())
-         @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary, emoji="🎧", custom_id="mythral_ticket_support")
+    @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary, emoji="🎧", custom_id="mythral_ticket_support")
     async def support_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
-        if existing:
+         if existing:
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(SupportModal())
