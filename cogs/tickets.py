@@ -139,6 +139,11 @@ class CloseTicketView(discord.ui.View):
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mythral_ticket_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+                staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
+        if staff_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Nu ai permisiunea de a închide acest tichet! Doar echipa administrativă poate face asta.", ephemeral=True)
+            return
+
         async with get_db() as db:
             await db.execute(
                 "UPDATE tickets SET status = 'closed' WHERE channel_id = ?",
