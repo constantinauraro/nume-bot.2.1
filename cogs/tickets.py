@@ -111,10 +111,11 @@ class DenyReasonSelect(discord.ui.Select):
         super().__init__(placeholder="Select a deny reason", min_values=1, max_values=1, options=options, custom_id="mythral_deny_select")
 
     async def callback(self, interaction: discord.Interaction):
-        staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
-        if staff_role not in interaction.user.roles:
-            await interaction.response.send_message("❌ Only staff can select the reason.", ephemeral=True)
+                freelancer_role = interaction.guild.get_role(1544135641275568158)
+        if freelancer_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Only freelancers can use the Deny button for this ticket.", ephemeral=True)
             return
+
 
         reason = self.values[0]
         await interaction.response.send_message(f"🔒 Ticket denied. Reason: **{reason}**. Archiving...", ephemeral=True)
