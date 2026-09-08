@@ -188,6 +188,10 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     if staff_role:
         overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
+    freelancer_role = guild.get_role(1544135641275568158)
+    if freelancer_role:
+        overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
     channel = await guild.create_text_channel(
         name=f"{ticket_type}-{str(interaction.id)[-4:]}",
         category=category,
