@@ -13,95 +13,95 @@ TICKET_TYPES = {
 
 
 # ---------------------------------------------------------------------------
-# MODALE - formularele pe care le completeaza clientul la deschiderea tichetului
+# MODALS - forms that clients fill out when opening a ticket
 # ---------------------------------------------------------------------------
 
 class QuoteModal(discord.ui.Modal, title="Get a quote"):
     project_type = discord.ui.TextInput(
-        label="Ce tip de proiect ai?",
-        placeholder="ex: Minecraft build, plugin, website...",
+        label="What type of project do you have?",
+        placeholder="e.g., Minecraft build, plugin, website...",
         max_length=100,
     )
     budget = discord.ui.TextInput(
-        label="Buget estimativ",
-        placeholder="ex: $50-100",
+        label="Estimated budget",
+        placeholder="e.g., $50-100",
         max_length=50,
     )
     deadline = discord.ui.TextInput(
-        label="Termen limită dorit",
-        placeholder="ex: 2 săptămâni / flexibil",
+        label="Desired deadline",
+        placeholder="e.g., 2 weeks / flexible",
         max_length=50,
         required=False,
     )
     description = discord.ui.TextInput(
-        label="Descrie proiectul în detaliu",
+        label="Describe the project in detail",
         style=discord.TextStyle.paragraph,
         max_length=1000,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = [
-            ("Tip proiect", str(self.project_type)),
-            ("Buget estimativ", str(self.budget)),
-            ("Termen limită", str(self.deadline) or "Nespecificat"),
-            ("Descriere", str(self.description)),
+            ("Project Type", str(self.project_type)),
+            ("Estimated Budget", str(self.budget)),
+            ("Deadline", str(self.deadline) or "Unspecified"),
+            ("Description", str(self.description)),
         ]
         await create_ticket_channel(interaction, "quote", fields)
 
 
 class ApplyModal(discord.ui.Modal, title="Apply for freelancer"):
     desired_role = discord.ui.TextInput(
-        label="Ce rol vrei să ocupi?",
-        placeholder="ex: Builder, Graphic Designer, Bot Developer...",
+        label="What role do you want to apply for?",
+        placeholder="e.g., Builder, Graphic Designer, Bot Developer...",
         max_length=100,
     )
     experience = discord.ui.TextInput(
-        label="Experiența ta",
+        label="Your experience",
         style=discord.TextStyle.paragraph,
-        placeholder="De cât timp faci asta, ce ai lucrat până acum...",
+        placeholder="How long have you been doing this, past projects...",
         max_length=500,
     )
     portfolio = discord.ui.TextInput(
-        label="Link portofoliu (obligatoriu)",
+        label="Portfolio link (required)",
         placeholder="https://...",
         max_length=200,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = [
-            ("Rol dorit", str(self.desired_role)),
-            ("Experiență", str(self.experience)),
-            ("Portofoliu", str(self.portfolio)),
+            ("Desired Role", str(self.desired_role)),
+            ("Experience", str(self.experience)),
+            ("Portfolio", str(self.portfolio)),
         ]
         await create_ticket_channel(interaction, "apply", fields)
 
 
 class SupportModal(discord.ui.Modal, title="General Support"):
     subject = discord.ui.TextInput(
-        label="Subiect",
-        placeholder="ex: Problemă cu o comandă",
+        label="Subject",
+        placeholder="e.g., Issue with an order",
         max_length=100,
     )
     description = discord.ui.TextInput(
-        label="Descrie problema ta",
+        label="Describe your issue",
         style=discord.TextStyle.paragraph,
         max_length=1000,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = [
-            ("Subiect", str(self.subject)),
-            ("Descriere", str(self.description)),
+            ("Subject", str(self.subject)),
+            ("Description", str(self.description)),
         ]
         await create_ticket_channel(interaction, "support", fields)
 
 
 # ---------------------------------------------------------------------------
-# VIEW-URI
+# VIEWS
 # ---------------------------------------------------------------------------
 
 class TicketPanelView(discord.ui.View):
-    """View-ul persistent cu cele 3 butoane din #ticket-creation."""
+    """Persistent view with the 3 buttons in #ticket-creation."""
 
     def __init__(self):
         super().__init__(timeout=None)
@@ -110,7 +110,7 @@ class TicketPanelView(discord.ui.View):
     async def quote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
         if existing:
-            await interaction.response.send_message(f"Ai deja un tichet deschis: <#{existing}>", ephemeral=True)
+            await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(QuoteModal())
 
@@ -118,7 +118,7 @@ class TicketPanelView(discord.ui.View):
     async def apply_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
         if existing:
-            await interaction.response.send_message(f"Ai deja un tichet deschis: <#{existing}>", ephemeral=True)
+            await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(ApplyModal())
 
@@ -126,22 +126,22 @@ class TicketPanelView(discord.ui.View):
     async def support_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
         if existing:
-            await interaction.response.send_message(f"Ai deja un tichet deschis: <#{existing}>", ephemeral=True)
+            await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(SupportModal())
 
 
 class CloseTicketView(discord.ui.View):
-    """View-ul persistent cu butonul de inchidere din canalul de tichet."""
+    """Persistent view with the close button inside the ticket channel."""
 
     def __init__(self):
         super().__init__(timeout=None)
 
-        @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mythral_ticket_close")
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mythral_ticket_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
         if staff_role not in interaction.user.roles:
-            await interaction.response.send_message("❌ Nu ai permisiunea de a închide acest tichet! Doar echipa administrativă poate face asta.", ephemeral=True)
+            await interaction.response.send_message("❌ You do not have permission to close this ticket! Only the administrative team can do this.", ephemeral=True)
             return
 
         async with get_db() as db:
@@ -151,7 +151,7 @@ class CloseTicketView(discord.ui.View):
             )
             await db.commit()
 
-        await interaction.response.send_message("🔒 Tichetul a fost închis și este mutat în arhivă...", ephemeral=True)
+        await interaction.response.send_message("🔒 This ticket is now closed and is being archived...", ephemeral=True)
         
         channel = interaction.channel
         guild = interaction.guild
@@ -164,12 +164,13 @@ class CloseTicketView(discord.ui.View):
         if archive_category:
             await channel.edit(category=archive_category, name=f"closed-{channel.name[-4:]}")
 
+
 # ---------------------------------------------------------------------------
-# LOGICA PARTAJATA
+# SHARED LOGIC
 # ---------------------------------------------------------------------------
 
 async def get_open_ticket(user_id: int, guild_id: int):
-    """Verifica daca userul are deja un tichet deschis, ca sa nu creeze mai multe."""
+    """Checks if the user already has an open ticket to prevent duplicates."""
     async with get_db() as db:
         cursor = await db.execute(
             "SELECT channel_id FROM tickets WHERE owner_id = ? AND status = 'open'",
@@ -212,7 +213,7 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
 
     embed = discord.Embed(
         title=f"{emoji} {label}",
-        description=f"Bun venit, {interaction.user.mention}! Un membru din staff te va ajuta în curând.",
+        description=f"Welcome, {interaction.user.mention}! A staff member will assist you shortly.",
         color=config.COLOR_MAIN,
     )
     for name, value in fields:
@@ -221,35 +222,4 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
 
     ping = f"{staff_role.mention} — " if staff_role else ""
     await channel.send(content=f"{ping}{interaction.user.mention}", embed=embed, view=CloseTicketView())
-    await interaction.response.send_message(f"✅ Tichetul tău a fost creat: {channel.mention}", ephemeral=True)
-
-
-# ---------------------------------------------------------------------------
-# COG
-# ---------------------------------------------------------------------------
-
-class Tickets(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        # Inregistram view-urile persistente ca sa functioneze butoanele si dupa restart
-        bot.add_view(TicketPanelView())
-        bot.add_view(CloseTicketView())
-
-    @app_commands.command(name="ticket-panel", description="Trimite panoul de creare tichete în acest canal (staff)")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def ticket_panel(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="🎫 Ticket Center",
-            description=(
-                "Bine ai venit în centrul de tichete. Aici poți deschide un tichet pentru a "
-                "cere o ofertă de preț, a obține suport pentru un produs, sau a aplica pentru a lucra cu noi."
-            ),
-            color=config.COLOR_MAIN,
-        )
-        embed.set_footer(text=config.STUDIO_FOOTER)
-        await interaction.channel.send(embed=embed, view=TicketPanelView())
-        await interaction.response.send_message("✅ Panoul a fost trimis.", ephemeral=True)
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(Tickets(bot))
+    await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
