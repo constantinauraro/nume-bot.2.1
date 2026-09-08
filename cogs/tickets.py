@@ -153,7 +153,7 @@ class CloseTicketView(discord.ui.View):
         
         await channel.set_permissions(guild.default_role, view_channel=False)
         
-        ARHIVA_ID = 1544151748900425829  
+        ARHIVA_ID = 1544151814012932256  
         archive_category = guild.get_channel(ARHIVA_ID)
         
         if archive_category:
