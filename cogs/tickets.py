@@ -223,3 +223,20 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     ping = f"{staff_role.mention} — " if staff_role else ""
     await channel.send(content=f"{ping}{interaction.user.mention}", embed=embed, view=CloseTicketView())
     await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# COG REGISTRATION - The missing part that caused the crash
+# ---------------------------------------------------------------------------
+
+class Tickets(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.bot.add_view(TicketPanelView())
+        self.bot.add_view(CloseTicketView())
+
+async def setup(bot):
+    await bot.add_cog(Tickets(bot))
