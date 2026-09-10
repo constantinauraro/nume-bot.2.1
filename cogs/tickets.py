@@ -6,11 +6,10 @@ import config
 from database import get_db
 
 TICKET_TYPES = {
-    "quote": ("💵", "Get a quote"),
-    "apply": ("💼", "Apply for freelancer"),
+    "quote": ("📝", "Get a quote"),
+    "apply": ("🪪", "Apply for freelancer"),
     "support": ("🎧", "General Support"),
 }
-
 
 # ---------------------------------------------------------------------------
 # MODALS - forms that clients fill out when opening a ticket
@@ -24,7 +23,7 @@ class QuoteModal(discord.ui.Modal, title="Get a quote"):
     )
     budget = discord.ui.TextInput(
         label="Estimated budget",
-        placeholder="e.g., $50-100",
+        placeholder="e.g., $50-$100",
         max_length=50,
     )
     deadline = discord.ui.TextInput(
@@ -101,26 +100,34 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
         label="Amount",
         placeholder="The amount you would like to quote. In USD",
         max_length=50,
-        required=True
+        required=True,
     )
     deadline = discord.ui.TextInput(
         label="Deadline",
         placeholder="e.g., 1 month 2 weeks",
         max_length=50,
-        required=True
+        required=True,
     )
     comment = discord.ui.TextInput(
         label="Comment",
         style=discord.TextStyle.paragraph,
         placeholder="Anything else you would like to add",
         max_length=1000,
-        required=False
+        required=False,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Gasim canalul clientului bazat pe numele canalului curent de freelancer
+        ticket_suffix = interaction.channel.name.replace("freelance-", "")
+        customer_channel = discord.utils.get(interaction.guild.text_channels, name=f"ticket-{ticket_suffix}")
+        
+        if not customer_channel:
+            await interaction.response.send_message("❌ Nu am putut găsi canalul corespondent al clientului.", ephemeral=True)
+            return
+
         embed = discord.Embed(
             title="💰 Official Project Quote",
-            description="A freelancer has submitted a price offer for this project.",
+            description=f"A freelancer ({interaction.user.mention}) has submitted a price offer for this project.",
             color=discord.Color.gold()
         )
         embed.add_field(name="Amount", value=str(self.amount), inline=True)
@@ -131,8 +138,37 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
         embed.set_footer(text=config.STUDIO_FOOTER)
         embed.timestamp = interaction.created_at
         
-        await interaction.response.send_message(embed=embed)
+        # Clasa interna pentru butonul de acceptare pe care apasa clientul
+        class AcceptQuoteView(discord.ui.View):
+            def __init__(self, freelancer, freelance_channel):
+                super().__init__(timeout=None)
+                self.freelancer = freelancer
+                self.freelance_channel = freelance_channel
+                
+            @discord.ui.button(label="Accept Quote", style=discord.ButtonStyle.success, emoji="✅", custom_id="accept_freelance_quote")
+            async def accept_callback(self, button_interaction: discord.Interaction):
+                # Permitem freelancerului accesul in canalul clientului
+                await button_interaction.channel.set_permissions(self.freelancer, view_channel=True, send_messages=True, attach_files=True)
+                
+                # Trimitem mesajul de succes
+                await button_interaction.response.send_message(f"🎉 Cota a fost acceptată! {self.freelancer.mention} a fost adăugat în chat. Puteți începe colaborarea!")
+                
+                # Dezactivam butonul dupa apasare
+                self.clear_items()
+                await button_interaction.message.edit(view=self)
+                
+                # Ștergem automat canalul public de freelanceri ca sa nu mai ramana deschis degeaba
+                if self.freelance_channel:
+                    try:
+                        await self.freelance_channel.delete(reason="Cota a fost acceptata.")
+                    except:
+                        pass
 
+        # Trimitem oferta direct in canalul clientului, insotita de butonul de acceptare
+        await customer_channel.send(embed=embed, view=AcceptQuoteView(interaction.user, interaction.channel))
+        
+        # Confirmam freelancerului in canalul lui ca oferta a fost trimisa cu succes
+        await interaction.response.send_message("✅ Oferta ta a fost trimisă cu succes în panoul clientului!", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +178,9 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
 class DenyReasonSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Won't fit in the deadline", description="The deadline is too short for our freelancers.", emoji="⏳"),
+            discord.SelectOption(label="Won't fit in the deadline", description="The deadline is too short for our freelancers.", emoji="⌛"),
             discord.SelectOption(label="Not interested", description="Our freelancers are not interested in this project.", emoji="❌"),
-            discord.SelectOption(label="Not my niche", description="This project is outside of our studio's expertise.", emoji="🎨"),
+            discord.SelectOption(label="Not my niche", description="This project is outside of our studio's expertise.", emoji="🎯"),
             discord.SelectOption(label="Budget", description="The budget is too low for the requested work.", emoji="💰"),
         ]
         super().__init__(placeholder="Select a deny reason", min_values=1, max_values=1, options=options, custom_id="mythral_deny_select")
@@ -157,14 +193,14 @@ class DenyReasonSelect(discord.ui.Select):
 
         reason = self.values[0]
         await interaction.response.send_message(f"🔒 Ticket denied. Reason: **{reason}**. Archiving...", ephemeral=True)
-        
+
         embed_reason = discord.Embed(
             title="Ticket Denied",
-            description=f"This ticket has been rejected by the freelancers.\n**Reason:** {reason}",
+            description=f"This ticket has been rejected by the freelancers.\n\n**Reason:** {reason}",
             color=discord.Color.red()
         )
         await interaction.channel.send(embed=embed_reason)
-        
+
         await interaction.channel.set_permissions(interaction.guild.default_role, view_channel=False)
         archive_category = interaction.guild.get_channel(1544151748900425829)
         if archive_category:
@@ -192,7 +228,6 @@ class NewTicketActionsView(discord.ui.View):
             await interaction.response.send_message("❌ Only freelancers can submit a quote for this ticket.", ephemeral=True)
             return
         await interaction.response.send_modal(QuotePriceModal())
-
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, custom_id="mythral_action_deny")
     async def deny_action(self, interaction: discord.Interaction, button: discord.ui.Button):
         freelancer_role = interaction.guild.get_role(1544135641275568158)
@@ -207,7 +242,6 @@ class NewTicketActionsView(discord.ui.View):
         )
         embed.set_footer(text=config.STUDIO_FOOTER)
         embed.timestamp = interaction.created_at
-        
         await interaction.response.send_message(embed=embed, view=DenyReasonView(), ephemeral=True)
 
     @discord.ui.button(label="Reviews", style=discord.ButtonStyle.primary, custom_id="mythral_action_reviews")
@@ -219,7 +253,7 @@ class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Get a quote", style=discord.ButtonStyle.success, emoji="💵", custom_id="mythral_ticket_quote")
+    @discord.ui.button(label="Get a quote", style=discord.ButtonStyle.success, emoji="📝", custom_id="mythral_ticket_quote")
     async def quote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
         if existing:
@@ -227,7 +261,7 @@ class TicketPanelView(discord.ui.View):
             return
         await interaction.response.send_modal(QuoteModal())
 
-    @discord.ui.button(label="Apply for freelancer", style=discord.ButtonStyle.primary, emoji="💼", custom_id="mythral_ticket_apply")
+    @discord.ui.button(label="Apply for freelancer", style=discord.ButtonStyle.primary, emoji="🪪", custom_id="mythral_ticket_apply")
     async def apply_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing = await get_open_ticket(interaction.user.id, interaction.guild.id)
         if existing:
@@ -242,7 +276,6 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
         await interaction.response.send_modal(SupportModal())
-
 
 
 # ---------------------------------------------------------------------------
@@ -264,13 +297,12 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     category = guild.get_channel(config.TICKET_CATEGORY_ID)
     emoji, label = TICKET_TYPES[ticket_type]
     
-    # Permisiuni de baza: Ascundem canalul de restul serverului
     base_overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
     }
     
-    # 1. Cream canalul CLIENTULUI (vizibil doar pentru Client si Staff/Administratori)
+    # 1. Canalul principal (al Clientului)
     customer_overwrites = base_overwrites.copy()
     customer_overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True)
     
@@ -278,13 +310,14 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     if staff_role:
         customer_overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         
+    clean_name = interaction.user.name.lower().replace(" ", "-")
+    
     customer_channel = await guild.create_text_channel(
-        name=f"ticket-{interaction.id[-4:]}",
+        name=f"ticket-{clean_name}",
         category=category,
         overwrites=customer_overwrites
     )
     
-    # Salvam tichetul clientului in baza de date
     async with get_db() as db:
         await db.execute(
             "INSERT INTO tickets (channel_id, owner_id, ticket_type) VALUES (?, ?, ?)",
@@ -292,7 +325,6 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         )
         await db.commit()
         
-    # Construim embed-ul cu informatii
     embed = discord.Embed(title="Information", color=discord.Color.green())
     for name, value in fields:
         embed.add_field(name=name, value=value or "-", inline=False)
@@ -300,7 +332,7 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     embed.set_footer(text=config.STUDIO_FOOTER)
     embed.timestamp = interaction.created_at
 
-    # Daca biletul este o cerere de pret, cream si canalul secret pentru FREELANCERI
+    # Dacă este o cerere de ofertă, creăm și canalul ascuns pentru freelanceri
     if ticket_type == "quote":
         freelancer_overwrites = base_overwrites.copy()
         freelancer_role = guild.get_role(1544135641275568158)
@@ -310,23 +342,21 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
             freelancer_overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
             
         freelancer_channel = await guild.create_text_channel(
-            name=f"freelance-{interaction.id[-4:]}",
+            name=f"freelance-{clean_name}",
             category=category,
             overwrites=freelancer_overwrites
         )
         
-        # Trimitem detaliile si butoanele de actiune doar in canalul freelancerilor
-        ping = f"New ticket for <@&1544135641275568158>."
+        ping = "New ticket for <@&1544135641275568158>."
         await freelancer_channel.send(content=ping, embed=embed, view=NewTicketActionsView())
         
-        # În canalul clientului trimitem doar un mesaj de asteptare
         await customer_channel.send(embed=embed)
         await customer_channel.send(f"👋 {interaction.user.mention}, cererea ta a fost trimisă către freelanceri! Vei primi ofertele de preț direct aici în cel mai scurt timp.")
     else:
-        # Pentru Support sau Apply, totul ramane pe canalul principal creat
         await customer_channel.send(embed=embed, view=NewTicketActionsView() if ticket_type == "apply" else None)
         
     await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
+
 
 # ---------------------------------------------------------------------------
 # COG REGISTRATION & SLASH COMMAND DEFINITION
@@ -350,7 +380,7 @@ class Tickets(commands.Cog):
             color=config.COLOR_MAIN
         )
         embed.set_footer(text=config.STUDIO_FOOTER)
-        
+
         await interaction.response.send_message("Sending ticket panel...", ephemeral=True)
         await interaction.channel.send(embed=embed, view=TicketPanelView())
 
