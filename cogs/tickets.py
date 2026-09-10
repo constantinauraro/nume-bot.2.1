@@ -40,7 +40,20 @@ async def ensure_schema():
                 assigned_freelancer_id INTEGER,
                 status TEXT DEFAULT 'open',
                 active_relay_message_id INTEGER,
-                active_relay_side TEXT
+                active_relay_side TEXT,
+                quoted_amount TEXT,
+                quoted_deadline TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS freelancer_profiles (
+                user_id INTEGER PRIMARY KEY,
+                portfolio TEXT,
+                timezone TEXT,
+                tech_stack TEXT,
+                bio TEXT
             )
             """
         )
@@ -52,12 +65,95 @@ async def ensure_schema():
             "ALTER TABLE tickets ADD COLUMN assigned_freelancer_id INTEGER",
             "ALTER TABLE tickets ADD COLUMN active_relay_message_id INTEGER",
             "ALTER TABLE tickets ADD COLUMN active_relay_side TEXT",
+            "ALTER TABLE tickets ADD COLUMN quoted_amount TEXT",
+            "ALTER TABLE tickets ADD COLUMN quoted_deadline TEXT",
         ):
             try:
                 await db.execute(stmt)
             except Exception:
                 pass
         await db.commit()
+
+
+async def get_freelancer_profile(user_id: int):
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT portfolio, timezone, tech_stack, bio FROM freelancer_profiles WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return {"portfolio": "Unset", "timezone": "Unset", "tech_stack": "Unset", "bio": "Unset"}
+        portfolio, timezone, tech_stack, bio = row
+        return {
+            "portfolio": portfolio or "Unset",
+            "timezone": timezone or "Unset",
+            "tech_stack": tech_stack or "Unset",
+            "bio": bio or "Unset",
+        }
+
+
+async def upsert_freelancer_profile(user_id: int, portfolio: str, timezone: str, tech_stack: str, bio: str):
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO freelancer_profiles (user_id, portfolio, timezone, tech_stack, bio)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                portfolio = excluded.portfolio,
+                timezone = excluded.timezone,
+                tech_stack = excluded.tech_stack,
+                bio = excluded.bio
+            """,
+            (user_id, portfolio, timezone, tech_stack, bio),
+        )
+        await db.commit()
+
+
+class FreelancerProfileModal(discord.ui.Modal, title="Profilul tău de freelancer"):
+    portfolio = discord.ui.TextInput(
+        label="Portfolio link",
+        placeholder="https://...",
+        max_length=200,
+        required=False,
+    )
+    timezone = discord.ui.TextInput(
+        label="Timezone",
+        placeholder="e.g., +01:00",
+        max_length=50,
+        required=False,
+    )
+    tech_stack = discord.ui.TextInput(
+        label="Tech Stack",
+        placeholder="e.g., WorldEdit, Blender, Java",
+        max_length=200,
+        required=False,
+    )
+    bio = discord.ui.TextInput(
+        label="Bio",
+        style=discord.TextStyle.paragraph,
+        placeholder="Spune-le clienților ceva despre tine...",
+        max_length=500,
+        required=False,
+    )
+
+    def __init__(self, existing: dict | None = None):
+        super().__init__()
+        if existing:
+            self.portfolio.default = None if existing["portfolio"] == "Unset" else existing["portfolio"]
+            self.timezone.default = None if existing["timezone"] == "Unset" else existing["timezone"]
+            self.tech_stack.default = None if existing["tech_stack"] == "Unset" else existing["tech_stack"]
+            self.bio.default = None if existing["bio"] == "Unset" else existing["bio"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await upsert_freelancer_profile(
+            interaction.user.id,
+            str(self.portfolio) or None,
+            str(self.timezone) or None,
+            str(self.tech_stack) or None,
+            str(self.bio) or None,
+        )
+        await interaction.response.send_message("✅ Profilul tău a fost salvat.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -179,40 +275,31 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
 
             async with get_db() as db:
                 await db.execute(
-                    "UPDATE tickets SET status = 'quoted', assigned_freelancer_id = ? WHERE rowid = ?",
-                    (interaction.user.id, ticket["id"]),
+                    "UPDATE tickets SET status = 'quoted', assigned_freelancer_id = ?, "
+                    "quoted_amount = ?, quoted_deadline = ? WHERE rowid = ?",
+                    (interaction.user.id, str(self.amount), str(self.deadline), ticket["id"]),
                 )
                 await db.commit()
 
-            # Confirmation shown in the freelancer channel (identity visible here, that's fine)
-            internal_embed = discord.Embed(
-                title="💰 Ofertă trimisă",
-                description="Oferta ta a fost trimisă clientului, în așteptarea răspunsului.",
-                color=discord.Color.gold(),
+            # Confirmation is EPHEMERAL - other freelancers with access to this
+            # shared channel must not see who quoted or for how much.
+            await interaction.response.send_message(
+                "✅ Oferta ta a fost trimisă clientului, în așteptarea răspunsului.", ephemeral=True
             )
-            internal_embed.add_field(name="Amount", value=str(self.amount), inline=True)
-            internal_embed.add_field(name="Deadline", value=str(self.deadline), inline=True)
-            if self.comment.value:
-                internal_embed.add_field(name="Comment", value=str(self.comment), inline=False)
-            internal_embed.set_footer(text=config.STUDIO_FOOTER)
-            internal_embed.timestamp = interaction.created_at
-            await interaction.response.send_message(embed=internal_embed)
 
-            # Anonymous copy shown to the client - no freelancer identity revealed
+            # Rich, identified card shown to the client (client-facing identity is fine,
+            # anonymity only applies between competing freelancers)
             customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
             if customer_channel:
-                client_embed = discord.Embed(
-                    title="💰 Ofertă de proiect primită",
-                    description="Un freelancer din echipa noastră a trimis o ofertă pentru proiectul tău.",
-                    color=discord.Color.gold(),
+                profile = await get_freelancer_profile(interaction.user.id)
+                await send_incoming_quote_card(
+                    customer_channel,
+                    freelancer=interaction.user,
+                    amount=str(self.amount),
+                    deadline=str(self.deadline),
+                    comment=str(self.comment) if self.comment.value else None,
+                    profile=profile,
                 )
-                client_embed.add_field(name="Amount", value=str(self.amount), inline=True)
-                client_embed.add_field(name="Deadline", value=str(self.deadline), inline=True)
-                if self.comment.value:
-                    client_embed.add_field(name="Comment", value=str(self.comment), inline=False)
-                client_embed.set_footer(text=config.STUDIO_FOOTER)
-                client_embed.timestamp = interaction.created_at
-                await customer_channel.send(embed=client_embed, view=AcceptDenyQuoteView())
             else:
                 log.error(
                     "QuotePriceModal: customer_channel_id %s not found for ticket %s",
@@ -231,12 +318,38 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
 
 
 # ---------------------------------------------------------------------------
-# ACCEPT / DECLINE QUOTE (client side)
+# INCOMING QUOTE CARD (client-facing, rich, per-freelancer)
 # ---------------------------------------------------------------------------
 
-class AcceptDenyQuoteView(discord.ui.View):
-    def __init__(self):
+async def send_incoming_quote_card(customer_channel, freelancer, amount, deadline, comment, profile):
+    embed = discord.Embed(
+        title="Incoming Quote",
+        description=f"{freelancer.mention} has quoted **${amount}**",
+        color=discord.Color.blue(),
+    )
+    embed.set_thumbnail(url=freelancer.display_avatar.url)
+    embed.add_field(name="Portfolio", value=profile["portfolio"], inline=False)
+    embed.add_field(name="Timezone", value=profile["timezone"], inline=False)
+    embed.add_field(name="Tech Stack", value=profile["tech_stack"], inline=False)
+    embed.add_field(name="Bio", value=profile["bio"], inline=False)
+    if comment:
+        embed.add_field(name="Message from freelancer:", value=f"```{comment}```", inline=False)
+    embed.add_field(name="Deadline", value=deadline, inline=False)
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = discord.utils.utcnow()
+
+    await customer_channel.send(embed=embed, view=IncomingQuoteView(amount=amount))
+
+
+class IncomingQuoteView(discord.ui.View):
+    """Not persisted across restarts, since the Accept button label is
+    dynamic (bakes in the quoted amount). If the bot restarts mid-negotiation,
+    re-send the quote (e.g. via a staff command) to get working buttons again."""
+
+    def __init__(self, amount: str):
         super().__init__(timeout=None)
+        self.amount = amount
+        self.accept_btn.label = f"Accept ${amount}"
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item):
         traceback.print_exc()
@@ -245,7 +358,7 @@ class AcceptDenyQuoteView(discord.ui.View):
         else:
             await interaction.followup.send("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
 
-    @discord.ui.button(label="Accept ofertă", style=discord.ButtonStyle.success, custom_id="mythral_quote_accept")
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         ticket = await get_ticket_by_customer_channel(interaction.channel.id)
         if not ticket or ticket["owner_id"] != interaction.user.id:
@@ -265,7 +378,7 @@ class AcceptDenyQuoteView(discord.ui.View):
 
         await interaction.followup.send(
             "✅ Ai acceptat oferta! Poți începe să discuți anonim cu freelancerul mai jos, "
-            "de îndată ce acesta trimite primul mesaj.",
+            "de îndată ce acesta trimite primul mesaj."
         )
 
         freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"])
@@ -273,7 +386,7 @@ class AcceptDenyQuoteView(discord.ui.View):
             await freelancer_channel.send("✅ Clientul a acceptat oferta ta!")
             await start_relay_chat(freelancer_channel, ticket["id"], "freelancer")
 
-    @discord.ui.button(label="Refuză oferta", style=discord.ButtonStyle.danger, custom_id="mythral_quote_decline")
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         ticket = await get_ticket_by_customer_channel(interaction.channel.id)
         if not ticket or ticket["owner_id"] != interaction.user.id:
@@ -299,6 +412,151 @@ class AcceptDenyQuoteView(discord.ui.View):
         freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"])
         if freelancer_channel:
             await freelancer_channel.send("❌ Clientul a refuzat oferta. Ticketul rămâne deschis pentru alți freelanceri.")
+
+    @discord.ui.button(label="Counteroffer", style=discord.ButtonStyle.secondary)
+    async def counteroffer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ticket = await get_ticket_by_customer_channel(interaction.channel.id)
+        if not ticket or ticket["owner_id"] != interaction.user.id:
+            await interaction.response.send_message("❌ Doar clientul poate face o contraofertă.", ephemeral=True)
+            return
+        if ticket["status"] != "quoted":
+            await interaction.response.send_message("❌ Această ofertă nu mai este activă.", ephemeral=True)
+            return
+        await interaction.response.send_modal(CounterofferModal())
+
+    @discord.ui.button(label="Message", style=discord.ButtonStyle.secondary, emoji="✉️")
+    async def message_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ticket = await get_ticket_by_customer_channel(interaction.channel.id)
+        if not ticket or ticket["owner_id"] != interaction.user.id:
+            await interaction.response.send_message("❌ Doar clientul poate trimite un mesaj.", ephemeral=True)
+            return
+        await interaction.response.send_modal(MessageModal())
+
+
+class CounterofferModal(discord.ui.Modal, title="Trimite o contraofertă"):
+    amount = discord.ui.TextInput(label="Suma propusă", placeholder="e.g., $250", max_length=50)
+    deadline = discord.ui.TextInput(label="Deadline propus", placeholder="e.g., 3 weeks", max_length=50, required=False)
+    message = discord.ui.TextInput(
+        label="Mesaj pentru freelancer",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=False,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ticket = await get_ticket_by_customer_channel(interaction.channel.id)
+        if not ticket or ticket["status"] != "quoted":
+            await interaction.response.send_message("❌ Această ofertă nu mai este activă.", ephemeral=True)
+            return
+
+        freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"])
+        if not freelancer_channel:
+            await interaction.response.send_message("❌ Nu am găsit canalul freelancerului.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🔁 Contraofertă de la client",
+            description=f"Clientul a propus **${self.amount}**"
+                        + (f" cu deadline **{self.deadline}**" if self.deadline.value else ""),
+            color=discord.Color.orange(),
+        )
+        if self.message.value:
+            embed.add_field(name="Mesaj:", value=f"```{self.message}```", inline=False)
+        embed.set_footer(text=config.STUDIO_FOOTER)
+        embed.timestamp = interaction.created_at
+
+        await freelancer_channel.send(embed=embed, view=CounterofferResponseView(amount=str(self.amount)))
+        await interaction.response.send_message("✅ Contraoferta ta a fost trimisă freelancerului.", ephemeral=True)
+
+
+class CounterofferResponseView(discord.ui.View):
+    def __init__(self, amount: str):
+        super().__init__(timeout=None)
+        self.amount = amount
+        self.accept_btn.label = f"Accept ${amount}"
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        traceback.print_exc()
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ticket = await get_ticket_by_freelancer_channel(interaction.channel.id)
+        if not ticket or ticket["assigned_freelancer_id"] != interaction.user.id:
+            await interaction.response.send_message("❌ Doar freelancerul asignat poate răspunde.", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE tickets SET status = 'accepted', quoted_amount = ? WHERE rowid = ?",
+                (self.amount, ticket["id"]),
+            )
+            await db.commit()
+
+        await interaction.followup.send("✅ Ai acceptat contraoferta clientului!")
+        await start_relay_chat(interaction.channel, ticket["id"], "freelancer")
+
+        customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
+        if customer_channel:
+            await customer_channel.send("✅ Freelancerul a acceptat contraoferta ta! Poți începe conversația anonimă mai jos.")
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ticket = await get_ticket_by_freelancer_channel(interaction.channel.id)
+        if not ticket or ticket["assigned_freelancer_id"] != interaction.user.id:
+            await interaction.response.send_message("❌ Doar freelancerul asignat poate răspunde.", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE tickets SET status = 'open', assigned_freelancer_id = NULL WHERE rowid = ?",
+                (ticket["id"],),
+            )
+            await db.commit()
+
+        await interaction.followup.send("❌ Ai refuzat contraoferta. Ticketul e din nou deschis pentru oferte.")
+
+        customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
+        if customer_channel:
+            await customer_channel.send("❌ Freelancerul a refuzat contraoferta ta. Un alt freelancer poate prelua ticketul.")
+
+
+class MessageModal(discord.ui.Modal, title="Trimite un mesaj"):
+    message = discord.ui.TextInput(
+        label="Mesajul tău",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ticket = await get_ticket_by_customer_channel(interaction.channel.id)
+        if not ticket or not ticket["assigned_freelancer_id"]:
+            await interaction.response.send_message("❌ Nu există niciun freelancer asignat momentan.", ephemeral=True)
+            return
+
+        freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"])
+        if not freelancer_channel:
+            await interaction.response.send_message("❌ Nu am găsit canalul freelancerului.", ephemeral=True)
+            return
+
+        embed = discord.Embed(description=str(self.message), color=discord.Color.blurple())
+        embed.set_author(name="💬 Client")
+        embed.timestamp = interaction.created_at
+        await freelancer_channel.send(embed=embed)
+        await start_relay_chat(freelancer_channel, ticket["id"], "freelancer")
+
+        await interaction.response.send_message("✅ Mesajul tău a fost trimis freelancerului.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +749,8 @@ async def get_ticket_by_freelancer_channel(channel_id: int):
 async def get_ticket_by_any_relay_channel(channel_id: int):
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT rowid AS id, * FROM tickets WHERE (customer_channel_id = ? OR freelancer_channel_id = ?) AND status = 'accepted'",
+            "SELECT rowid AS id, * FROM tickets WHERE (customer_channel_id = ? OR freelancer_channel_id = ?) "
+            "AND active_relay_message_id IS NOT NULL",
             (channel_id, channel_id),
         )
         row = await cursor.fetchone()
@@ -651,7 +910,6 @@ class Tickets(commands.Cog):
         await ensure_schema()
         self.bot.add_view(TicketPanelView())
         self.bot.add_view(NewTicketActionsView())
-        self.bot.add_view(AcceptDenyQuoteView())
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -706,6 +964,15 @@ class Tickets(commands.Cog):
 
         other_side = "freelancer" if side == "customer" else "customer"
         await start_relay_chat(destination_channel, ticket["id"], other_side)
+
+    @app_commands.command(name="freelancer-profile", description="Setează sau editează profilul tău de freelancer")
+    async def freelancer_profile(self, interaction: discord.Interaction):
+        freelancer_role = interaction.guild.get_role(FREELANCER_ROLE_ID)
+        if freelancer_role not in interaction.user.roles:
+            await interaction.response.send_message("❌ Doar freelancerii pot seta un profil.", ephemeral=True)
+            return
+        existing = await get_freelancer_profile(interaction.user.id)
+        await interaction.response.send_modal(FreelancerProfileModal(existing=existing))
 
     @app_commands.command(name="ticket-panel", description="Spawns the ticket creation panel")
     @app_commands.checks.has_permissions(administrator=True)
