@@ -262,49 +262,70 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     guild = interaction.guild
     category = guild.get_channel(config.TICKET_CATEGORY_ID)
     emoji, label = TICKET_TYPES[ticket_type]
-
-    overwrites = {
+    
+    # Permisiuni de baza: Ascundem canalul de restul serverului
+    base_overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
     }
+    
+    # 1. Cream canalul CLIENTULUI (vizibil doar pentru Client si Staff/Administratori)
+    customer_overwrites = base_overwrites.copy()
+    customer_overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True)
     
     staff_role = guild.get_role(config.STAFF_ROLE_ID)
     if staff_role:
-        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-
-    freelancer_role = guild.get_role(1544135641275568158)
-    if freelancer_role:
-        overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-
-    channel = await guild.create_text_channel(
-        name=f"{ticket_type}-{str(interaction.id)[-4:]}",
+        customer_overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        
+    customer_channel = await guild.create_text_channel(
+        name=f"ticket-{interaction.id[-4:]}",
         category=category,
-        overwrites=overwrites,
+        overwrites=customer_overwrites
     )
-
+    
+    # Salvam tichetul clientului in baza de date
     async with get_db() as db:
         await db.execute(
             "INSERT INTO tickets (channel_id, owner_id, ticket_type) VALUES (?, ?, ?)",
-            (channel.id, interaction.user.id, ticket_type),
+            (customer_channel.id, interaction.user.id, ticket_type),
         )
         await db.commit()
-
-    embed = discord.Embed(
-        title="Information",
-        color=discord.Color.green()
-    )
-    for name, value in fields:
-        embed.add_field(name=name, value=value or "—", inline=False)
         
-    embed.add_field(name="Rating", value="⭐⭐⭐⭐⭐ (0)", inline=False)
+    # Construim embed-ul cu informatii
+    embed = discord.Embed(title="Information", color=discord.Color.green())
+    for name, value in fields:
+        embed.add_field(name=name, value=value or "-", inline=False)
+    embed.add_field(name="Rating", value="⭐ ⭐ ⭐ ⭐ ⭐ (0)", inline=False)
     embed.set_footer(text=config.STUDIO_FOOTER)
     embed.timestamp = interaction.created_at
 
-    ping = f"New ticket for <@&1544135641275568158>." if staff_role else "New ticket received."
-    await channel.send(content=ping, embed=embed, view=NewTicketActionsView())
-    await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
-
+    # Daca biletul este o cerere de pret, cream si canalul secret pentru FREELANCERI
+    if ticket_type == "quote":
+        freelancer_overwrites = base_overwrites.copy()
+        freelancer_role = guild.get_role(1544135641275568158)
+        if freelancer_role:
+            freelancer_overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        if staff_role:
+            freelancer_overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            
+        freelancer_channel = await guild.create_text_channel(
+            name=f"freelance-{interaction.id[-4:]}",
+            category=category,
+            overwrites=freelancer_overwrites
+        )
+        
+        # Trimitem detaliile si butoanele de actiune doar in canalul freelancerilor
+        ping = f"New ticket for <@&1544135641275568158>."
+        await freelancer_channel.send(content=ping, embed=embed, view=NewTicketActionsView())
+        
+        # În canalul clientului trimitem doar un mesaj de asteptare
+        await customer_channel.send(embed=embed)
+        await customer_channel.send(f"👋 {interaction.user.mention}, cererea ta a fost trimisă către freelanceri! Vei primi ofertele de preț direct aici în cel mai scurt timp.")
+    else:
+        # Pentru Support sau Apply, totul ramane pe canalul principal creat
+        await customer_channel.send(embed=embed, view=NewTicketActionsView() if ticket_type == "apply" else None)
+        
+    await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # COG REGISTRATION & SLASH COMMAND DEFINITION
