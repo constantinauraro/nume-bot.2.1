@@ -301,7 +301,7 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     embed.set_footer(text=config.STUDIO_FOOTER)
     embed.timestamp = interaction.created_at
 
-    ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
+    ping = f"New ticket for <@&1544135641275568158>." if staff_role else "New ticket received."
     await channel.send(content=ping, embed=embed, view=NewTicketActionsView())
     await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
 
