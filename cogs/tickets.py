@@ -383,6 +383,9 @@ class IncomingQuoteView(discord.ui.View):
 
         freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"])
         if freelancer_channel:
+            assigned_member = interaction.guild.get_member(ticket["assigned_freelancer_id"])
+            if assigned_member:
+                await lock_freelancer_channel_to_assignee(freelancer_channel, assigned_member)
             await freelancer_channel.send("✅ Clientul a acceptat oferta ta!")
             await start_relay_chat(freelancer_channel, ticket["id"], "freelancer")
 
@@ -501,6 +504,7 @@ class CounterofferResponseView(discord.ui.View):
             await db.commit()
 
         await interaction.followup.send("✅ Ai acceptat contraoferta clientului!")
+        await lock_freelancer_channel_to_assignee(interaction.channel, interaction.user)
         await start_relay_chat(interaction.channel, ticket["id"], "freelancer")
 
         customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
@@ -762,6 +766,20 @@ async def archive_channel(channel: discord.TextChannel):
     archive_category = channel.guild.get_channel(ARCHIVE_CATEGORY_ID)
     if archive_category:
         await channel.edit(category=archive_category, name=f"closed-{channel.name[-4:]}")
+
+
+async def lock_freelancer_channel_to_assignee(channel: discord.TextChannel, freelancer: discord.Member):
+    """Called once a quote is accepted: removes the blanket freelancer-role
+    access and grants the winning freelancer an individual, explicit
+    permission overwrite, so the channel disappears for every other
+    freelancer with the role."""
+    freelancer_role = channel.guild.get_role(FREELANCER_ROLE_ID)
+    if freelancer_role:
+        try:
+            await channel.set_permissions(freelancer_role, overwrite=None)
+        except discord.HTTPException:
+            pass
+    await channel.set_permissions(freelancer, view_channel=True, send_messages=True, attach_files=True)
 
 
 # ---------------------------------------------------------------------------
