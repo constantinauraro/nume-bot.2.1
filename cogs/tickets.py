@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import traceback
 
 import discord
@@ -20,6 +21,13 @@ TICKET_TYPES = {
 FREELANCER_ROLE_ID = 1544135641275568158
 ARCHIVE_CATEGORY_ID = 1544151814012932256
 FREELANCER_CATEGORY_ID = getattr(config, "FREELANCER_CATEGORY_ID", config.TICKET_CATEGORY_ID)
+
+# Studio logo shown instead of the client's own avatar when their messages
+# are relayed to freelancers - the client must stay 100% anonymous, so no
+# real avatar or name is ever attached to that side of the relay. Bundle the
+# image in an "assets" folder next to this file (or update the path below).
+MYTHRAL_LOGO_FILENAME = "mythral_logo.png"
+MYTHRAL_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", MYTHRAL_LOGO_FILENAME)
 
 
 # ---------------------------------------------------------------------------
@@ -1173,19 +1181,39 @@ async def create_simple_ticket(interaction: discord.Interaction, ticket_type: st
 # ---------------------------------------------------------------------------
 # GROUP RELAY (pre-acceptance discussion between client and every freelancer
 # with access to the offer channel). Freelancer -> client messages show the
-# freelancer's name/avatar; client -> freelancer messages stay generic
-# ("💬 Client") since there's only ever one client per ticket.
+# freelancer's name/avatar; client -> freelancer messages show the studio
+# logo instead of the client's real avatar/name - the client stays 100%
+# anonymous, always.
 # ---------------------------------------------------------------------------
 
-async def relay_message(destination_channel: discord.TextChannel, message: discord.Message, label: str, icon_url: str | None = None):
+async def relay_message(
+    destination_channel: discord.TextChannel,
+    message: discord.Message,
+    label: str,
+    icon_url: str | None = None,
+    use_logo_icon: bool = False,
+):
+    """Relays `message` into `destination_channel` as a plain embed.
+
+    icon_url: shows a real per-sender avatar (used for freelancer -> client,
+    where the freelancer's identity is meant to be visible).
+    use_logo_icon: shows the bundled studio logo instead of any real avatar
+    (used for client -> freelancer, so the client stays 100% anonymous - no
+    photo, no name, nothing that could identify them).
+    """
     embed = discord.Embed(description=message.content or "*[fără text]*", color=discord.Color.blurple())
-    if icon_url:
+
+    files = [await a.to_file() for a in message.attachments] if message.attachments else []
+
+    if use_logo_icon:
+        files.append(discord.File(MYTHRAL_LOGO_PATH, filename=MYTHRAL_LOGO_FILENAME))
+        embed.set_author(name=label, icon_url=f"attachment://{MYTHRAL_LOGO_FILENAME}")
+    elif icon_url:
         embed.set_author(name=label, icon_url=icon_url)
     else:
         embed.set_author(name=label)
-    embed.timestamp = message.created_at
 
-    files = [await a.to_file() for a in message.attachments] if message.attachments else []
+    embed.timestamp = message.created_at
     await destination_channel.send(embed=embed, files=files)
 
     try:
@@ -1250,7 +1278,7 @@ class Tickets(commands.Cog):
                 await relay_message(
                     freelancer_channel, message,
                     label="💬 Client",
-                    icon_url=message.author.display_avatar.url,
+                    use_logo_icon=True,
                 )
             return
 
