@@ -1206,8 +1206,19 @@ async def relay_message(
     files = [await a.to_file() for a in message.attachments] if message.attachments else []
 
     if use_logo_icon:
-        files.append(discord.File(MYTHRAL_LOGO_PATH, filename=MYTHRAL_LOGO_FILENAME))
-        embed.set_author(name=label, icon_url=f"attachment://{MYTHRAL_LOGO_FILENAME}")
+        try:
+            files.append(discord.File(MYTHRAL_LOGO_PATH, filename=MYTHRAL_LOGO_FILENAME))
+            embed.set_author(name=label, icon_url=f"attachment://{MYTHRAL_LOGO_FILENAME}")
+        except (FileNotFoundError, OSError):
+            # Don't let a missing/misplaced logo asset silently swallow the
+            # whole relay - the message still needs to reach the other side,
+            # it just won't have the logo icon this time. Deploy
+            # assets/mythral_logo.png next to tickets.py to fix the icon.
+            log.warning(
+                "Mythral logo not found at %s - relaying '%s' without an icon.",
+                MYTHRAL_LOGO_PATH, label,
+            )
+            embed.set_author(name=label)
     elif icon_url:
         embed.set_author(name=label, icon_url=icon_url)
     else:
