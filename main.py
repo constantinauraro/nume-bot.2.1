@@ -6,6 +6,7 @@ from discord.ext import commands
 
 import config
 from database import init_db
+from cogs.tickets import ensure_schema
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,7 +19,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 EXTENSIONS = [
     "cogs.tickets",
     "cogs.profiles",
-    "cogs.reviews",
+    # "cogs.reviews",  # dezactivat: definea o comandă "/review" separată,
+    # cu același nume ca /review din cogs.tickets - conflict la sincronizare.
+    # Reactiveaz-o doar după ce redenumești comanda din cogs/reviews.py.
     "cogs.levels",
     "cogs.store",
     "cogs.interactions",
@@ -37,6 +40,11 @@ async def on_ready():
 
 async def main():
     await init_db()
+    # Aplică orice migrare/coloană lipsă din "tickets" O SINGURĂ DATĂ, la
+    # pornire - nu mai așteptăm ca cineva să deschidă un ticket nou de tip
+    # "quote" ca schema să fie completă (vezi ensure_schema în cogs/tickets.py).
+    await ensure_schema()
+
     async with bot:
         for ext in EXTENSIONS:
             try:
