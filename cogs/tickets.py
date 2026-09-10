@@ -134,6 +134,7 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
         await interaction.response.send_message(embed=embed)
 
 
+
 # ---------------------------------------------------------------------------
 # DENY REASONS DROPDOWN (Exclusive for Freelancers)
 # ---------------------------------------------------------------------------
