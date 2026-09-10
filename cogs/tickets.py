@@ -74,6 +74,22 @@ async def ensure_schema():
             )
             """
         )
+        # One row per freelancer -> client review, submitted via DM after a
+        # ticket is closed. A client can rack up several of these across
+        # different tickets/freelancers.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                client_id INTEGER NOT NULL,
+                freelancer_id INTEGER NOT NULL,
+                rating INTEGER NOT NULL,
+                comment TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         # One row per client, remembers whether they want to be pinged when
         # a freelancer sends them a chat message or a quote. Defaults to
         # "pinged" (True) for anyone who never touched the buttons.
@@ -119,6 +135,49 @@ async def ensure_schema():
             except Exception:
                 pass
         await db.commit()
+
+
+def _stars(rating: float) -> str:
+    full = round(rating)
+    return "⭐" * full + "☆" * (5 - full)
+
+
+async def add_client_review(ticket_id: int, client_id: int, freelancer_id: int, rating: int, comment: str | None):
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO reviews (ticket_id, client_id, freelancer_id, rating, comment, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (ticket_id, client_id, freelancer_id, rating, comment, discord.utils.utcnow().isoformat()),
+        )
+        await db.commit()
+
+
+async def get_client_rating(client_id: int):
+    """Returns (average_rating, review_count) for a client. (0.0, 0) if none yet."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT AVG(rating), COUNT(*) FROM reviews WHERE client_id = ?", (client_id,)
+        )
+        avg, count = await cursor.fetchone()
+        return (round(avg, 1) if avg else 0.0, count or 0)
+
+
+async def get_client_reviews(client_id: int, limit: int = 5):
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT rating, comment, freelancer_id, created_at FROM reviews "
+            "WHERE client_id = ? ORDER BY id DESC LIMIT ?",
+            (client_id, limit),
+        )
+        return await cursor.fetchall()
+
+
+async def has_reviewed(ticket_id: int, freelancer_id: int) -> bool:
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM reviews WHERE ticket_id = ? AND freelancer_id = ?", (ticket_id, freelancer_id)
+        )
+        return await cursor.fetchone() is not None
 
 
 async def get_freelancer_profile(user_id: int):
@@ -839,7 +898,28 @@ class NewTicketActionsView(discord.ui.View):
 
     @discord.ui.button(label="Reviews", style=discord.ButtonStyle.primary, custom_id="mythral_action_reviews")
     async def reviews_action(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⭐ Displaying freelancer reviews...", ephemeral=True)
+        ticket = await get_ticket_by_freelancer_channel(interaction.channel.id)
+        if not ticket:
+            await interaction.response.send_message("❌ Ticketul nu a fost găsit.", ephemeral=True)
+            return
+
+        client_id = ticket["owner_id"]
+        avg, count = await get_client_rating(client_id)
+        embed = discord.Embed(
+            title="⭐ Client Reviews",
+            description=f"<@{client_id}> has an average rating of **{_stars(avg)} ({avg}/5)** across **{count}** review(s).",
+            color=discord.Color.gold(),
+        )
+        if count:
+            reviews = await get_client_reviews(client_id, limit=5)
+            for rating, comment, freelancer_id, created_at in reviews:
+                embed.add_field(
+                    name=_stars(rating),
+                    value=comment or "*No comment left.*",
+                    inline=False,
+                )
+        embed.set_footer(text=config.STUDIO_FOOTER)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class TicketPanelView(discord.ui.View):
@@ -962,6 +1042,100 @@ async def archive_freelancer_channel(channel: discord.TextChannel):
         except discord.HTTPException:
             pass
     await archive_channel(channel)
+
+
+# ---------------------------------------------------------------------------
+# CLIENT REVIEWS - freelancers rate the client after a ticket is closed. The
+# request is sent by DM (mirrors the client-facing "Reviews" button on the
+# request card, which shows what other freelancers said about this client).
+# ---------------------------------------------------------------------------
+
+class ReviewClientModal(discord.ui.Modal, title="Review Client"):
+    rating = discord.ui.TextInput(
+        label="Rating (1-5)",
+        placeholder="e.g., 5",
+        max_length=1,
+    )
+    comment = discord.ui.TextInput(
+        label="Comment (optional)",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=False,
+    )
+
+    def __init__(self, ticket_id: int, client_id: int, freelancer_id: int):
+        super().__init__()
+        self.ticket_id = ticket_id
+        self.client_id = client_id
+        self.freelancer_id = freelancer_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.rating).strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= 5):
+            await interaction.response.send_message("❌ Rating-ul trebuie să fie un număr între 1 și 5.", ephemeral=True)
+            return
+
+        await add_client_review(
+            self.ticket_id, self.client_id, self.freelancer_id,
+            int(raw), str(self.comment) if self.comment.value else None,
+        )
+        await interaction.response.send_message("✅ Mulțumim pentru review! Este vizibil doar freelancerilor.", ephemeral=True)
+        for child in self.review_view.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self.review_view)
+        except (discord.HTTPException, AttributeError):
+            pass
+
+
+class ReviewClientView(discord.ui.View):
+    """Not persistent across restarts (the ticket/client/freelancer ids are
+    baked into the closure, same trade-off as IncomingQuoteView above) - if
+    the bot restarts before a freelancer reviews, re-trigger /close-ticket's
+    DM manually to get a working button again."""
+
+    def __init__(self, ticket_id: int, client_id: int, freelancer_id: int):
+        super().__init__(timeout=None)
+        self.ticket_id = ticket_id
+        self.client_id = client_id
+        self.freelancer_id = freelancer_id
+
+    @discord.ui.button(label="Review", style=discord.ButtonStyle.success)
+    async def review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await has_reviewed(self.ticket_id, self.freelancer_id):
+            await interaction.response.send_message("✅ Ai lăsat deja un review pentru acest client.", ephemeral=True)
+            return
+        modal = ReviewClientModal(self.ticket_id, self.client_id, self.freelancer_id)
+        modal.review_view = self
+        await interaction.response.send_modal(modal)
+
+
+async def send_client_review_request(bot: discord.Client, ticket: dict, client: discord.abc.User):
+    """DMs the freelancer who worked the ticket, asking them to rate the client."""
+    freelancer_id = ticket.get("assigned_freelancer_id")
+    if not freelancer_id:
+        return
+    freelancer = bot.get_user(freelancer_id) or await bot.fetch_user(freelancer_id)
+    if not freelancer:
+        return
+
+    embed = discord.Embed(
+        title="Review Client",
+        description=(
+            "We care about our freelancers and we want to know how you found working with "
+            f"`{client.display_name if hasattr(client, 'display_name') else client.name}`?\n"
+            "Use the button below to describe your experience.\n"
+            "The review will only be visible to freelancers."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = discord.utils.utcnow()
+
+    try:
+        await freelancer.send(embed=embed, view=ReviewClientView(ticket["id"], client.id, freelancer_id))
+    except discord.HTTPException:
+        log.warning("Could not DM freelancer %s a review request for ticket %s.", freelancer_id, ticket["id"])
 
 
 async def finalize_quote_acceptance(bot: discord.Client, guild: discord.Guild, ticket: dict, quote: dict):
@@ -1155,7 +1329,7 @@ async def send_ticket_welcome(channel: discord.TextChannel, member: discord.Memb
             f"- It is also important to mention that we have a <#{TOS_CHANNEL_ID}> you should "
             "follow during the commission process.\n"
             f"- If you need any assistance, do not hesitate to ping any of our "
-            f"**{EXECUTIVE_TEAM_LABEL}** or open a support ticket."
+            f"**{EXECUTIVE_TEAM_LABEL}**."
         ),
         color=config.COLOR_MAIN,
     )
@@ -1216,7 +1390,8 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
     freelancer_embed = discord.Embed(title="Information", color=discord.Color.green())
     for name, value in fields:
         freelancer_embed.add_field(name=name, value=value or "—", inline=False)
-    freelancer_embed.add_field(name="Rating", value="⭐⭐⭐⭐⭐ (0)", inline=False)
+    client_avg, client_review_count = await get_client_rating(interaction.user.id)
+    freelancer_embed.add_field(name="Rating", value=f"{_stars(client_avg)} ({client_review_count})", inline=False)
     freelancer_embed.set_footer(text=config.STUDIO_FOOTER)
     freelancer_embed.timestamp = interaction.created_at
 
@@ -1435,6 +1610,46 @@ class Tickets(commands.Cog):
                     use_logo_icon=True,
                 )
             return
+
+    @app_commands.command(name="close-ticket", description="Închide un ticket finalizat și cere freelancerului un review despre client")
+    async def close_ticket(self, interaction: discord.Interaction):
+        ticket = await get_ticket_by_customer_channel(interaction.channel.id)
+        if not ticket:
+            await interaction.response.send_message("❌ Acest canal nu este un ticket de client.", ephemeral=True)
+            return
+        if ticket["status"] != "accepted":
+            await interaction.response.send_message(
+                "❌ Doar un ticket cu o ofertă acceptată poate fi închis astfel.", ephemeral=True
+            )
+            return
+
+        staff_role = interaction.guild.get_role(config.STAFF_ROLE_ID)
+        is_staff = staff_role and staff_role in interaction.user.roles
+        is_assigned_freelancer = interaction.user.id == ticket.get("assigned_freelancer_id")
+        if not (is_staff or is_assigned_freelancer):
+            await interaction.response.send_message(
+                "❌ Doar staff-ul sau freelancerul asignat poate închide acest ticket.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message("🔒 Se închide ticketul...", ephemeral=True)
+
+        async with get_db() as db:
+            await db.execute("UPDATE tickets SET status = 'closed' WHERE rowid = ?", (ticket["id"],))
+            await db.commit()
+
+        client = interaction.guild.get_member(ticket["owner_id"]) or await self.bot.fetch_user(ticket["owner_id"])
+        if client:
+            await send_client_review_request(self.bot, ticket, client)
+
+        closed_embed = discord.Embed(
+            title="Ticket închis",
+            description="Acest proiect a fost marcat ca finalizat. Mulțumim pentru colaborare!",
+            color=discord.Color.green(),
+        )
+        closed_embed.set_footer(text=config.STUDIO_FOOTER)
+        await interaction.channel.send(embed=closed_embed)
+        await archive_channel(interaction.channel)
 
     @app_commands.command(name="freelancer-profile", description="Setează sau editează profilul tău de freelancer")
     async def freelancer_profile(self, interaction: discord.Interaction):
