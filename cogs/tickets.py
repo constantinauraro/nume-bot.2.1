@@ -826,12 +826,13 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
     )
 
     async with get_db() as db:
-        await db.execute(
+        cursor = await db.execute(
             "INSERT INTO tickets (ticket_type, owner_id, customer_channel_id, freelancer_channel_id, status) "
             "VALUES ('quote', ?, ?, ?, 'open')",
             (interaction.user.id, customer_channel.id, freelancer_channel.id),
         )
         await db.commit()
+        ticket_id = cursor.lastrowid
 
     # Embed sent to the freelancer channel, WITH full project details
     freelancer_embed = discord.Embed(title="Information", color=discord.Color.green())
@@ -843,12 +844,15 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
 
     ping = f"New quote request for {freelancer_role.mention}." if freelancer_role else "New quote request received."
     await freelancer_channel.send(content=ping, embed=freelancer_embed, view=NewTicketActionsView())
+    # Anyone with freelancer role can start talking to the client right away.
+    # Whoever replies first automatically claims this client (see on_message).
+    await start_relay_chat(freelancer_channel, ticket_id, "freelancer")
 
     # Embed sent to the customer channel, WITHOUT freelancer identity
     customer_embed = discord.Embed(
         title="✅ Cererea ta a fost trimisă",
-        description="Un freelancer din echipa noastră va analiza cererea și îți va trimite o ofertă în curând. "
-                     "Nu vei putea vedea cine anume lucrează la ofertă până când nu o accepți.",
+        description="Un freelancer din echipa noastră va analiza cererea și te poate contacta direct aici, anonim, "
+                     "pentru a discuta detalii. Nu vei putea vedea cine anume lucrează la ofertă până când nu o accepți.",
         color=discord.Color.green(),
     )
     customer_embed.set_footer(text=config.STUDIO_FOOTER)
@@ -959,8 +963,23 @@ class Tickets(commands.Cog):
 
         if side == "customer" and message.author.id != ticket["owner_id"]:
             return
-        if side == "freelancer" and message.author.id != ticket["assigned_freelancer_id"]:
-            return
+
+        if side == "freelancer":
+            if ticket["assigned_freelancer_id"] is None:
+                freelancer_role = message.guild.get_role(FREELANCER_ROLE_ID)
+                if freelancer_role not in message.author.roles:
+                    return
+                # First freelancer to reply claims this client - lock everyone else out
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE tickets SET assigned_freelancer_id = ? WHERE rowid = ?",
+                        (message.author.id, ticket["id"]),
+                    )
+                    await db.commit()
+                ticket["assigned_freelancer_id"] = message.author.id
+                await lock_freelancer_channel_to_assignee(message.channel, message.author)
+            elif message.author.id != ticket["assigned_freelancer_id"]:
+                return
 
         destination_id = ticket["freelancer_channel_id"] if side == "customer" else ticket["customer_channel_id"]
         destination_channel = message.guild.get_channel(destination_id)
