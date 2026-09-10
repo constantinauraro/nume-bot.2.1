@@ -311,11 +311,14 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         if freelancer_role:
             freelancer_overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
             
+        clean_name = interaction.user.name.lower().replace(" ", "-")
+
         freelancer_channel = await guild.create_text_channel(
             name=f"freelance-{clean_name}",
             category=category,
             overwrites=freelancer_overwrites
         )
+
         
         ping = "New ticket for <@&1544135641275568158>."
         await freelancer_channel.send(content=ping, embed=embed, view=NewTicketActionsView())
