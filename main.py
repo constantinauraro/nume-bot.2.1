@@ -37,9 +37,8 @@ async def on_ready():
         await bot.tree.sync()
         print("[OK] Toate comenzile globale vechi au fost ȘTERSE din Discord.")
         
-        # 2. Șterge comenzile de pe server (în caz că ai înregistrat comanda direct pe server în trecut)
-        # NOTĂ: Schimbă 1234567890 de mai jos cu ID-ul REAL al serverului tău de Discord!
-        ID_SERVER = 1234567890 
+        # 2. Șterge comenzile specifice de pe serverul tău
+        ID_SERVER = 1544005370383704207 
         server_obiect = discord.Object(id=ID_SERVER)
         bot.tree.clear(guild=server_obiect)
         await bot.tree.sync(guild=server_obiect)
@@ -47,7 +46,6 @@ async def on_ready():
 
         print("[INFO] Reînregistrăm doar comenzile noi și valide...")
         # 3. Încarcă din nou în arbore comenzile din cogs-urile active (cum e ticket.py)
-        # discord.py va citi automat modulele încărcate deja în main()
         synced = await bot.tree.sync()
         print(f"[SUCCESS] {len(synced)} comenzi slash înregistrate curat.")
         
