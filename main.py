@@ -30,27 +30,18 @@ EXTENSIONS = [
 async def on_ready():
     print(f"[OK] Conectat ca {bot.user} (ID: {bot.user.id})")
     try:
-        print("[INFO] Pornire CURĂȚARE TOTALĂ (Globale + Guild)...")
-        
-        # 1. Șterge absolut toate comenzile globale din baza de data Discord
+        # Ștergem complet comenzile GLOBALE din memoria botului local.
+        # Astfel, când tickets.py încearcă să le copieze pe server, lista e goală și nu se mai dublează nimic!
         bot.tree.clear(guild=None)
-        await bot.tree.sync()
-        print("[OK] Toate comenzile globale au fost ȘTERSE.")
         
-        # 2. Șterge comenzile locale specifice de pe serverul tău
+        # Sincronizăm curat doar pe serverul tău, eliminând cache-ul vechi
         ID_SERVER = 1544005370383704207 
         server_obiect = discord.Object(id=ID_SERVER)
-        bot.tree.clear(guild=server_obiect)
-        await bot.tree.sync(guild=server_obiect)
-        print("[OK] Toate comenzile de pe serverul 1544005370383704207 au fost ȘTERSE.")
-
-        print("[INFO] Sincronizare curată...")
-        # 3. Forțăm o singură sincronizare globală curată
-        synced = await bot.tree.sync()
-        print(f"[SUCCESS] {len(synced)} comenzi înregistrate curat la nivel Global.")
         
+        await bot.tree.sync(guild=server_obiect)
+        print("[SUCCESS] Sincronizare finalizată pe server fără comenzi duplicate!")
     except Exception as e:
-        print(f"[EROARE] Problemă la curățare: {e}")
+        print(f"[EROARE] Sincronizare comenzi: {e}")
 
 
 async def main():
