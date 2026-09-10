@@ -203,6 +203,10 @@ class QuoteModal(discord.ui.Modal, title="Get a quote"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        existing = await get_open_ticket(interaction.guild, interaction.user.id)
+        if existing:
+            await interaction.response.send_message(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
+            return
         fields = [
             ("Project Type", str(self.project_type)),
             ("Estimated Budget", str(self.budget)),
@@ -231,6 +235,10 @@ class ApplyModal(discord.ui.Modal, title="Apply for freelancer"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        existing = await get_open_ticket(interaction.guild, interaction.user.id)
+        if existing:
+            await interaction.response.send_message(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
+            return
         fields = [
             ("Desired Role", str(self.desired_role)),
             ("Experience", str(self.experience)),
@@ -252,6 +260,10 @@ class SupportModal(discord.ui.Modal, title="General Support"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        existing = await get_open_ticket(interaction.guild, interaction.user.id)
+        if existing:
+            await interaction.response.send_message(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
+            return
         fields = [
             ("Subject", str(self.subject)),
             ("Description", str(self.description)),
@@ -854,26 +866,19 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="Get a quote", style=discord.ButtonStyle.success, emoji="💵", custom_id="mythral_ticket_quote")
     async def quote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        existing = await get_open_ticket(interaction.guild, interaction.user.id)
-        if existing:
-            await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
-            return
+        # Sent immediately, with no DB call in between - a modal must be the
+        # very first response to an interaction, and even a small delay here
+        # (DB latency, etc.) can make Discord expire the interaction before
+        # we get to respond. The "already have a ticket" check now happens
+        # in the modal's on_submit instead, which has its own fresh timer.
         await interaction.response.send_modal(QuoteModal())
 
     @discord.ui.button(label="Apply for freelancer", style=discord.ButtonStyle.primary, emoji="💼", custom_id="mythral_ticket_apply")
     async def apply_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        existing = await get_open_ticket(interaction.guild, interaction.user.id)
-        if existing:
-            await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
-            return
         await interaction.response.send_modal(ApplyModal())
 
     @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary, emoji="🎧", custom_id="mythral_ticket_support")
     async def support_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        existing = await get_open_ticket(interaction.guild, interaction.user.id)
-        if existing:
-            await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
-            return
         await interaction.response.send_modal(SupportModal())
 
 
@@ -1141,6 +1146,39 @@ class Tickets(commands.Cog):
         await ensure_schema()
         self.bot.add_view(TicketPanelView())
         self.bot.add_view(NewTicketActionsView())
+        await self.restore_pending_quote_views()
+
+    async def restore_pending_quote_views(self):
+        """IncomingQuoteView isn't a persistent view (its Accept button label
+        bakes in the quoted amount), so any quote card still awaiting a
+        client response when the bot restarts is left with dead buttons -
+        clicking Accept does nothing, the freelancer channel never gets
+        archived, and the freelancer never gets merged into the ticket.
+        This is especially likely right after a counteroffer round-trip
+        (client -> freelancer DM -> client), since a restart in that window
+        silently kills the card. On every startup, re-attach a fresh,
+        working view to every quote card still pending."""
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT q.id, q.amount, q.message_id, t.customer_channel_id "
+                "FROM quotes q JOIN tickets t ON t.rowid = q.ticket_id "
+                "WHERE q.status = 'pending' AND t.status = 'open' AND q.message_id IS NOT NULL"
+            )
+            rows = await cursor.fetchall()
+
+        restored = 0
+        for quote_id, amount, message_id, customer_channel_id in rows:
+            channel = self.bot.get_channel(customer_channel_id)
+            if not channel:
+                continue
+            try:
+                msg = await channel.fetch_message(message_id)
+                await msg.edit(view=IncomingQuoteView(quote_id=quote_id, amount=str(amount)))
+                restored += 1
+            except discord.HTTPException:
+                log.warning("Could not restore quote view for quote %s", quote_id)
+        if restored:
+            log.info("Restored %d pending quote card(s) after restart.", restored)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
