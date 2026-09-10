@@ -270,8 +270,10 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     }
     
     staff_role = guild.get_role(config.STAFF_ROLE_ID)
-    if staff_role:
-        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    if ticket_type != "quote":
+        if freelancer_role:
+            overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
 
     freelancer_role = guild.get_role(1544135641275568158)
     if freelancer_role:
@@ -290,20 +292,40 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
         )
         await db.commit()
 
-    embed = discord.Embed(
-        title="Information",
-        color=discord.Color.green()
-    )
-    for name, value in fields:
-        embed.add_field(name=name, value=value or "—", inline=False)
-        
-    embed.add_field(name="Rating", value="⭐⭐⭐⭐⭐ (0)", inline=False)
+        embed = discord.Embed(title="Information", color=discord.Color.green())
+        for name, value in fields:
+            embed.add_field(name=name, value=value or "-", inline=False)
+    embed.add_field(name="Rating", value="⭐ ⭐ ⭐ ⭐ ⭐ (0)", inline=False)
     embed.set_footer(text=config.STUDIO_FOOTER)
     embed.timestamp = interaction.created_at
 
-    ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
-    await channel.send(content=ping, embed=embed, view=NewTicketActionsView())
-    await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+    if ticket_type == "quote":
+        freelancer_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+        if staff_role:
+            freelancer_overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            
+        freelancer_role = guild.get_role(1544135641275568158)
+        if freelancer_role:
+            freelancer_overwrites[freelancer_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            
+        freelancer_channel = await guild.create_text_channel(
+            name=f"freelance-{clean_name}",
+            category=category,
+            overwrites=freelancer_overwrites
+        )
+        
+        ping = "New ticket for <@&1544135641275568158>."
+        await freelancer_channel.send(content=ping, embed=embed, view=NewTicketActionsView())
+        
+        await customer_channel.send(embed=embed)
+        await customer_channel.send(f"👋 {interaction.user.mention}, cererea ta a fost trimisă către freelanceri! Vei primi ofertele de preț direct aici în cel mai scurt timp.")
+    else:
+        await customer_channel.send(embed=embed, view=NewTicketActionsView() if ticket_type == "apply" else None)
+        
+    await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
