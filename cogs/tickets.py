@@ -1256,10 +1256,44 @@ class FreelancerReviewModal(discord.ui.Modal, title="Lasă o recenzie"):
             await interaction.response.send_message("❌ Rating-ul trebuie să fie un număr între 1 și 5.", ephemeral=True)
             return
 
+        rating_val = int(raw)
         await add_freelancer_review(
             self.ticket_id, self.freelancer_id, self.client_id,
-            str(self.service), int(raw), str(self.comment) if self.comment.value else None,
+            str(self.service), rating_val, str(self.comment) if self.comment.value else None,
         )
+
+        # Post a public copy in the studio's #reviews channel, same as the
+        # old standalone /review command used to do before it was merged
+        # into this ticket-based flow.
+        reviews_channel_id = getattr(config, "REVIEWS_CHANNEL_ID", None)
+        reviews_channel = interaction.guild.get_channel(reviews_channel_id) if reviews_channel_id else None
+        if reviews_channel:
+            freelancer_member = interaction.guild.get_member(self.freelancer_id)
+            review_embed = discord.Embed(
+                title=f"⭐ New review from {interaction.user.display_name}",
+                color=getattr(config, "COLOR_GOLD", config.COLOR_MAIN),
+            )
+            review_embed.add_field(name="Service Provided", value=str(self.service), inline=False)
+            review_embed.add_field(
+                name="Freelancer",
+                value=freelancer_member.display_name if freelancer_member else f"<@{self.freelancer_id}>",
+                inline=False,
+            )
+            review_embed.add_field(name="Rating", value=_stars(rating_val) + f" ({rating_val}/5)", inline=False)
+            if self.comment.value:
+                review_embed.add_field(name="Comment", value=f"```{self.comment}```", inline=False)
+            review_embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            review_embed.set_footer(text=config.STUDIO_FOOTER)
+            try:
+                await reviews_channel.send(embed=review_embed)
+            except discord.HTTPException:
+                log.warning("Could not post review to #reviews channel for ticket %s.", self.ticket_id)
+        else:
+            log.warning(
+                "config.REVIEWS_CHANNEL_ID is not set (or channel not found) - "
+                "review for ticket %s was saved but not posted publicly.", self.ticket_id
+            )
+
         await interaction.response.send_message("✅ Mulțumim pentru recenzie!", ephemeral=True)
         for child in self.review_view.children:
             child.disabled = True
