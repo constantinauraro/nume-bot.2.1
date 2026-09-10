@@ -1048,7 +1048,8 @@ async def get_ticket_by_id(ticket_id: int):
 async def get_ticket_by_customer_channel(channel_id: int):
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT rowid AS id, * FROM tickets WHERE customer_channel_id = ?", (channel_id,)
+            "SELECT rowid AS id, * FROM tickets WHERE COALESCE(customer_channel_id, channel_id) = ?",
+            (channel_id,),
         )
         row = await cursor.fetchone()
         return await _row_to_dict(cursor, row)
