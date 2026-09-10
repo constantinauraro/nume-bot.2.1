@@ -1092,9 +1092,9 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
     chat_embed = discord.Embed(
         title="💬 Discuție cu clientul",
         description="Dă **reply la acest mesaj** oricând pentru a discuta cu clientul și a-ți face o idee "
-                     "despre proiect. Mesajele tale ajung la client anonim, fără numele tău. Orice altceva "
-                     "scrii în canal (care nu e reply la acest mesaj) rămâne doar între freelanceri și nu "
-                     "ajunge la client. Când ești pregătit, trimite o ofertă cu butonul **Quote** de mai sus.",
+                     "despre proiect. Clientul va vedea numele și poza ta de profil la mesajele trimise astfel. "
+                     "Orice altceva scrii în canal (care nu e reply la acest mesaj) rămâne doar între freelanceri "
+                     "și nu ajunge la client. Când ești pregătit, trimite o ofertă cu butonul **Quote** de mai sus.",
         color=discord.Color.blurple(),
     )
     chat_prompt_msg = await freelancer_channel.send(embed=chat_embed)
@@ -1105,17 +1105,28 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
         )
         await db.commit()
 
-    # Embed sent to the customer channel, WITHOUT freelancer identity
+    # Embed sent to the customer channel
     customer_embed = discord.Embed(
         title="✅ Cererea ta a fost trimisă",
-        description="Freelancerii din echipa noastră pot analiza cererea și te pot contacta direct aici, anonim, "
-                     "pentru a discuta detalii și a-ți trimite oferte. Nu vei putea vedea cine anume lucrează la "
-                     "fiecare ofertă până când nu o accepți.",
+        description="Freelancerii din echipa noastră pot analiza cererea și te pot contacta direct aici "
+                     "pentru a discuta detalii și a-ți trimite oferte.",
         color=discord.Color.green(),
     )
     customer_embed.set_footer(text=config.STUDIO_FOOTER)
     customer_embed.timestamp = interaction.created_at
     await customer_channel.send(embed=customer_embed)
+
+    # Explains the same chat mechanic from the client's side - unlike the
+    # freelancer prompt above, no "reply to this message" is needed here:
+    # every message the client sends in this channel is relayed as-is.
+    customer_chat_embed = discord.Embed(
+        title="💬 Discuție cu freelancerii",
+        description="Poți scrie orice mesaj în acest canal pentru a discuta cu freelancerii care au acces la "
+                     "proiectul tău - nu trebuie să dai reply, orice trimiți aici ajunge la ei. Când un "
+                     "freelancer îți răspunde, vei vedea numele și poza lui de profil.",
+        color=discord.Color.blurple(),
+    )
+    await customer_channel.send(embed=customer_chat_embed)
 
     await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
 
@@ -1160,13 +1171,18 @@ async def create_simple_ticket(interaction: discord.Interaction, ticket_type: st
 
 
 # ---------------------------------------------------------------------------
-# ANONYMOUS GROUP RELAY (pre-acceptance discussion between client and every
-# freelancer with access to the offer channel)
+# GROUP RELAY (pre-acceptance discussion between client and every freelancer
+# with access to the offer channel). Freelancer -> client messages show the
+# freelancer's name/avatar; client -> freelancer messages stay generic
+# ("💬 Client") since there's only ever one client per ticket.
 # ---------------------------------------------------------------------------
 
-async def relay_message(destination_channel: discord.TextChannel, message: discord.Message, label: str):
+async def relay_message(destination_channel: discord.TextChannel, message: discord.Message, label: str, icon_url: str | None = None):
     embed = discord.Embed(description=message.content or "*[fără text]*", color=discord.Color.blurple())
-    embed.set_author(name=label)
+    if icon_url:
+        embed.set_author(name=label, icon_url=icon_url)
+    else:
+        embed.set_author(name=label)
     embed.timestamp = message.created_at
 
     files = [await a.to_file() for a in message.attachments] if message.attachments else []
@@ -1194,8 +1210,9 @@ class Tickets(commands.Cog):
             return
 
         # Freelancer discussion channel: any freelancer can talk to the
-        # client to form an opinion on the project. Relayed anonymously -
-        # no one freelancer claims the client by being first to reply.
+        # client to form an opinion on the project. Relayed with the
+        # freelancer's own name/avatar attached, so the client can tell
+        # freelancers apart and follow a conversation with the same person.
         # Only messages that are a reply to the "Discuție cu clientul" prompt
         # are relayed, so freelancers can still talk among themselves in the
         # same channel without that leaking to the client.
@@ -1216,7 +1233,11 @@ class Tickets(commands.Cog):
             if freelancer_role and freelancer_role in message.author.roles:
                 customer_channel = message.guild.get_channel(ticket["customer_channel_id"])
                 if customer_channel:
-                    await relay_message(customer_channel, message, label="💬 Freelancer")
+                    await relay_message(
+                        customer_channel, message,
+                        label=f"💬 {message.author.display_name}",
+                        icon_url=message.author.display_avatar.url,
+                    )
             return
 
         # Customer channel: the client talking back to the whole freelancer
@@ -1226,7 +1247,11 @@ class Tickets(commands.Cog):
         if ticket and ticket["status"] == "open" and message.author.id == ticket["owner_id"]:
             freelancer_channel = message.guild.get_channel(ticket["freelancer_channel_id"])
             if freelancer_channel:
-                await relay_message(freelancer_channel, message, label="💬 Client")
+                await relay_message(
+                    freelancer_channel, message,
+                    label="💬 Client",
+                    icon_url=message.author.display_avatar.url,
+                )
             return
 
     @app_commands.command(name="freelancer-profile", description="Setează sau editează profilul tău de freelancer")
