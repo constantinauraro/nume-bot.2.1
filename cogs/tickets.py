@@ -22,6 +22,14 @@ FREELANCER_ROLE_ID = 1544135641275568158
 ARCHIVE_CATEGORY_ID = 1544151814012932256
 FREELANCER_CATEGORY_ID = getattr(config, "FREELANCER_CATEGORY_ID", config.TICKET_CATEGORY_ID)
 
+# Used by the ticket-welcome message (see send_ticket_welcome below).
+STUDIO_NAME = "Mythral Creations"
+TOS_CHANNEL_ID = 1544009125451800707
+# There is no dedicated "welcome"/"server info" channel, so #general is used
+# in its place for both of those links in the welcome message.
+GENERAL_CHANNEL_NAME = "general"
+EXECUTIVE_TEAM_LABEL = "Executive team"
+
 # Studio logo shown instead of the client's own avatar when their messages
 # are relayed to freelancers - the client must stay 100% anonymous, so no
 # real avatar or name is ever attached to that side of the relay. Bundle the
@@ -63,6 +71,17 @@ async def ensure_schema():
                 timezone TEXT,
                 tech_stack TEXT,
                 bio TEXT
+            )
+            """
+        )
+        # One row per client, remembers whether they want to be pinged when
+        # a freelancer sends them a chat message or a quote. Defaults to
+        # "pinged" (True) for anyone who never touched the buttons.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_prefs (
+                user_id INTEGER PRIMARY KEY,
+                pinged INTEGER NOT NULL DEFAULT 1
             )
             """
         )
@@ -133,6 +152,27 @@ async def upsert_freelancer_profile(user_id: int, portfolio: str, timezone: str,
                 bio = excluded.bio
             """,
             (user_id, portfolio, timezone, tech_stack, bio),
+        )
+        await db.commit()
+
+
+async def get_ping_pref(user_id: int) -> bool:
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT pinged FROM notification_prefs WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return True if row is None else bool(row[0])
+
+
+async def set_ping_pref(user_id: int, pinged: bool):
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO notification_prefs (user_id, pinged) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET pinged = excluded.pinged
+            """,
+            (user_id, int(pinged)),
         )
         await db.commit()
 
@@ -346,6 +386,7 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
             customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
             if customer_channel:
                 profile = await get_freelancer_profile(interaction.user.id)
+                wants_ping = await get_ping_pref(ticket["owner_id"])
                 msg = await send_incoming_quote_card(
                     customer_channel,
                     quote_id=quote_id,
@@ -354,6 +395,7 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
                     deadline=str(self.deadline),
                     comment=str(self.comment) if self.comment.value else None,
                     profile=profile,
+                    ping_user_id=ticket["owner_id"] if wants_ping else None,
                 )
                 async with get_db() as db:
                     await db.execute("UPDATE quotes SET message_id = ? WHERE id = ?", (msg.id, quote_id))
@@ -379,7 +421,7 @@ class QuotePriceModal(discord.ui.Modal, title="Quote"):
 # INCOMING QUOTE CARD (client-facing, rich, per-freelancer)
 # ---------------------------------------------------------------------------
 
-async def send_incoming_quote_card(customer_channel, quote_id, freelancer, amount, deadline, comment, profile):
+async def send_incoming_quote_card(customer_channel, quote_id, freelancer, amount, deadline, comment, profile, ping_user_id=None):
     embed = discord.Embed(
         title="Incoming Quote",
         description=f"{freelancer.mention} has quoted **${amount}**",
@@ -396,7 +438,8 @@ async def send_incoming_quote_card(customer_channel, quote_id, freelancer, amoun
     embed.set_footer(text=config.STUDIO_FOOTER)
     embed.timestamp = discord.utils.utcnow()
 
-    return await customer_channel.send(embed=embed, view=IncomingQuoteView(quote_id=quote_id, amount=amount))
+    content = f"<@{ping_user_id}>" if ping_user_id else None
+    return await customer_channel.send(content=content, embed=embed, view=IncomingQuoteView(quote_id=quote_id, amount=amount))
 
 
 class IncomingQuoteView(discord.ui.View):
@@ -1035,6 +1078,92 @@ async def finalize_quote_acceptance(bot: discord.Client, guild: discord.Guild, t
 # TICKET CREATION
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# TICKET WELCOME MESSAGE - a mention-preference panel followed by a short
+# orientation message, sent to the client the moment their ticket channel is
+# created.
+# ---------------------------------------------------------------------------
+
+class MentionPreferenceView(discord.ui.View):
+    """Lets the client toggle whether they get pinged on incoming freelancer
+    messages/quotes. Persistent (custom_id-based) so the buttons keep working
+    across restarts. Note: the *label* shown right after a bot restart may be
+    stale until someone clicks a button, since old panels aren't re-rendered
+    on boot - only the button behaviour is guaranteed to stay correct."""
+
+    def __init__(self, pinged: bool = True):
+        super().__init__(timeout=None)
+        self._sync(pinged)
+
+    def _sync(self, pinged: bool):
+        self.enable_btn.label = "Already Enabled" if pinged else "Enable"
+        self.enable_btn.disabled = pinged
+        self.disable_btn.label = "Disable" if pinged else "Already Disabled"
+        self.disable_btn.disabled = not pinged
+
+    @discord.ui.button(label="Already Enabled", style=discord.ButtonStyle.success, custom_id="mention_pref_enable")
+    async def enable_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await set_ping_pref(interaction.user.id, True)
+        self._sync(True)
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Disable", style=discord.ButtonStyle.danger, custom_id="mention_pref_disable")
+    async def disable_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await set_ping_pref(interaction.user.id, False)
+        self._sync(False)
+        await interaction.response.edit_message(view=self)
+
+
+class DismissWelcomeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.danger, custom_id="ticket_welcome_dismiss")
+    async def dismiss_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
+
+
+async def send_ticket_welcome(channel: discord.TextChannel, member: discord.Member):
+    """Posted once, right after a ticket channel is created for `member`."""
+    pinged = await get_ping_pref(member.id)
+
+    pref_embed = discord.Embed(
+        description=(
+            "By using the buttons below, you can control whether you'd want to be mentioned "
+            "every time a freelancer sends you a message or a quote.\n"
+            f"Currently you {'**will be pinged**' if pinged else '**will not be pinged**'}."
+        ),
+        color=config.COLOR_MAIN,
+    )
+    pref_embed.set_footer(text=config.STUDIO_FOOTER)
+    pref_embed.timestamp = discord.utils.utcnow()
+    await channel.send(embed=pref_embed, view=MentionPreferenceView(pinged=pinged))
+
+    general_channel = discord.utils.get(channel.guild.text_channels, name=GENERAL_CHANNEL_NAME)
+    general_mention = general_channel.mention if general_channel else f"#{GENERAL_CHANNEL_NAME}"
+
+    welcome_embed = discord.Embed(
+        description=(
+            f"Hello, {member.mention}!\n"
+            f"**Thank you for choosing {STUDIO_NAME}.**\n\n"
+            "It looks like this is your first commission made here.\n"
+            f"- If you are unsure on how our server works, or want to have a look around, "
+            f"check out {general_mention}.\n"
+            f"- It is also important to mention that we have a <#{TOS_CHANNEL_ID}> you should "
+            "follow during the commission process.\n"
+            f"- If you need any assistance, do not hesitate to ping any of our "
+            f"**{EXECUTIVE_TEAM_LABEL}** or open a support ticket."
+        ),
+        color=config.COLOR_MAIN,
+    )
+    welcome_embed.set_footer(text=config.STUDIO_FOOTER)
+    welcome_embed.timestamp = discord.utils.utcnow()
+    await channel.send(embed=welcome_embed, view=DismissWelcomeView())
+
+
 async def create_quote_ticket(interaction: discord.Interaction, fields: list[tuple[str, str]]):
     """Creates two separate channels (customer / freelancer) so neither side
     can see or interact with the other until a quote is accepted."""
@@ -1136,6 +1265,8 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
     )
     await customer_channel.send(embed=customer_chat_embed)
 
+    await send_ticket_welcome(customer_channel, interaction.user)
+
     await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
 
 
@@ -1175,6 +1306,9 @@ async def create_simple_ticket(interaction: discord.Interaction, ticket_type: st
 
     ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
     await channel.send(content=ping, embed=embed)
+
+    await send_ticket_welcome(channel, interaction.user)
+
     await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
 
 
@@ -1192,6 +1326,7 @@ async def relay_message(
     label: str,
     icon_url: str | None = None,
     use_logo_icon: bool = False,
+    ping_user_id: int | None = None,
 ):
     """Relays `message` into `destination_channel` as a plain embed.
 
@@ -1200,6 +1335,9 @@ async def relay_message(
     use_logo_icon: shows the bundled studio logo instead of any real avatar
     (used for client -> freelancer, so the client stays 100% anonymous - no
     photo, no name, nothing that could identify them).
+    ping_user_id: when given, that user is @-mentioned above the embed -
+    used for freelancer -> client relays, gated by the client's mention
+    preference (see get_ping_pref/MentionPreferenceView).
     """
     embed = discord.Embed(description=message.content or "*[fără text]*", color=discord.Color.blurple())
 
@@ -1225,7 +1363,8 @@ async def relay_message(
         embed.set_author(name=label)
 
     embed.timestamp = message.created_at
-    await destination_channel.send(embed=embed, files=files)
+    content = f"<@{ping_user_id}>" if ping_user_id else None
+    await destination_channel.send(content=content, embed=embed, files=files)
 
     try:
         await message.add_reaction("✅")
@@ -1242,6 +1381,8 @@ class Tickets(commands.Cog):
         await ensure_schema()
         self.bot.add_view(TicketPanelView())
         self.bot.add_view(NewTicketActionsView())
+        self.bot.add_view(MentionPreferenceView())
+        self.bot.add_view(DismissWelcomeView())
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -1272,10 +1413,12 @@ class Tickets(commands.Cog):
             if freelancer_role and freelancer_role in message.author.roles:
                 customer_channel = message.guild.get_channel(ticket["customer_channel_id"])
                 if customer_channel:
+                    wants_ping = await get_ping_pref(ticket["owner_id"])
                     await relay_message(
                         customer_channel, message,
                         label=f"💬 {message.author.display_name}",
                         icon_url=message.author.display_avatar.url,
+                        ping_user_id=ticket["owner_id"] if wants_ping else None,
                     )
             return
 
