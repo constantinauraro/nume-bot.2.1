@@ -92,24 +92,6 @@ async def ensure_schema():
             )
             """
         )
-        # One row per client -> freelancer review, requested in-channel via
-        # /review before a ticket is closed. Separate table/name from
-        # client_reviews (that one is freelancer -> client) and from any
-        # pre-existing "reviews" table elsewhere in the bot.
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS freelancer_reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticket_id INTEGER NOT NULL,
-                freelancer_id INTEGER NOT NULL,
-                client_id INTEGER NOT NULL,
-                service TEXT NOT NULL,
-                rating INTEGER NOT NULL,
-                comment TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
         # One row per client, remembers whether they want to be pinged when
         # a freelancer sends them a chat message or a quote. Defaults to
         # "pinged" (True) for anyone who never touched the buttons.
@@ -196,44 +178,6 @@ async def has_reviewed(ticket_id: int, freelancer_id: int) -> bool:
     async with get_db() as db:
         cursor = await db.execute(
             "SELECT 1 FROM client_reviews WHERE ticket_id = ? AND freelancer_id = ?", (ticket_id, freelancer_id)
-        )
-        return await cursor.fetchone() is not None
-
-
-async def add_freelancer_review(ticket_id: int, freelancer_id: int, client_id: int, service: str, rating: int, comment: str | None):
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO freelancer_reviews (ticket_id, freelancer_id, client_id, service, rating, comment, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ticket_id, freelancer_id, client_id, service, rating, comment, discord.utils.utcnow().isoformat()),
-        )
-        await db.commit()
-
-
-async def get_freelancer_rating(freelancer_id: int):
-    """Returns (average_rating, review_count) for a freelancer. (0.0, 0) if none yet."""
-    async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT AVG(rating), COUNT(*) FROM freelancer_reviews WHERE freelancer_id = ?", (freelancer_id,)
-        )
-        avg, count = await cursor.fetchone()
-        return (round(avg, 1) if avg else 0.0, count or 0)
-
-
-async def get_freelancer_reviews(freelancer_id: int, limit: int = 5):
-    async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT rating, comment, service, client_id, created_at FROM freelancer_reviews "
-            "WHERE freelancer_id = ? ORDER BY id DESC LIMIT ?",
-            (freelancer_id, limit),
-        )
-        return await cursor.fetchall()
-
-
-async def has_reviewed_freelancer(ticket_id: int, client_id: int) -> bool:
-    async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT 1 FROM freelancer_reviews WHERE ticket_id = ? AND client_id = ?", (ticket_id, client_id)
         )
         return await cursor.fetchone() is not None
 
@@ -545,8 +489,6 @@ async def send_incoming_quote_card(customer_channel, quote_id, freelancer, amoun
         color=discord.Color.blue(),
     )
     embed.set_thumbnail(url=freelancer.display_avatar.url)
-    fr_avg, fr_count = await get_freelancer_rating(freelancer.id)
-    embed.add_field(name="Rating", value=f"{_stars(fr_avg)} ({fr_count})", inline=False)
     embed.add_field(name="Portfolio", value=profile["portfolio"], inline=False)
     embed.add_field(name="Timezone", value=profile["timezone"], inline=False)
     embed.add_field(name="Tech Stack", value=profile["tech_stack"], inline=False)
@@ -1048,8 +990,7 @@ async def get_ticket_by_id(ticket_id: int):
 async def get_ticket_by_customer_channel(channel_id: int):
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT rowid AS id, * FROM tickets WHERE COALESCE(customer_channel_id, channel_id) = ?",
-            (channel_id,),
+            "SELECT rowid AS id, * FROM tickets WHERE customer_channel_id = ?", (channel_id,)
         )
         row = await cursor.fetchone()
         return await _row_to_dict(cursor, row)
@@ -1211,93 +1152,6 @@ async def send_client_review_request(bot: discord.Client, ticket: dict, client: 
         await freelancer.send(embed=embed, view=ReviewClientView(ticket["id"], client.id, freelancer_id))
     except discord.HTTPException:
         log.warning("Could not DM freelancer %s a review request for ticket %s.", freelancer_id, ticket["id"])
-
-
-# ---------------------------------------------------------------------------
-# FREELANCER REVIEWS - the client rates the freelancer. Unlike client
-# reviews (sent by DM), this one is requested in-channel: the freelancer
-# runs /review before the ticket is closed, which posts a panel the client
-# clicks to open the form.
-# ---------------------------------------------------------------------------
-
-class FreelancerReviewModal(discord.ui.Modal, title="Lasă o recenzie"):
-    service = discord.ui.TextInput(
-        label="Serviciu oferit",
-        placeholder="ex: Builder, Web Developer...",
-        max_length=100,
-    )
-    rating = discord.ui.TextInput(
-        label="Rating (1-5)",
-        placeholder="5",
-        max_length=1,
-    )
-    comment = discord.ui.TextInput(
-        label="Comentariu",
-        style=discord.TextStyle.paragraph,
-        max_length=500,
-    )
-
-    def __init__(self, ticket_id: int, freelancer_id: int, client_id: int):
-        super().__init__()
-        self.ticket_id = ticket_id
-        self.freelancer_id = freelancer_id
-        self.client_id = client_id
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
-        traceback.print_exc()
-        if not interaction.response.is_done():
-            await interaction.response.send_message("❌ A apărut o eroare la trimiterea recenziei.", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ A apărut o eroare la trimiterea recenziei.", ephemeral=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        raw = str(self.rating).strip()
-        if not raw.isdigit() or not (1 <= int(raw) <= 5):
-            await interaction.response.send_message("❌ Rating-ul trebuie să fie un număr între 1 și 5.", ephemeral=True)
-            return
-
-        await add_freelancer_review(
-            self.ticket_id, self.freelancer_id, self.client_id,
-            str(self.service), int(raw), str(self.comment) if self.comment.value else None,
-        )
-        await interaction.response.send_message("✅ Mulțumim pentru recenzie!", ephemeral=True)
-        for child in self.review_view.children:
-            child.disabled = True
-        try:
-            await interaction.message.edit(view=self.review_view)
-        except (discord.HTTPException, AttributeError):
-            pass
-
-
-class FreelancerReviewView(discord.ui.View):
-    """Not persistent across restarts, same trade-off documented on
-    IncomingQuoteView/ReviewClientView above - if the bot restarts before the
-    client reviews, the freelancer can just run /review again."""
-
-    def __init__(self, ticket_id: int, freelancer_id: int, client_id: int):
-        super().__init__(timeout=None)
-        self.ticket_id = ticket_id
-        self.freelancer_id = freelancer_id
-        self.client_id = client_id
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
-        traceback.print_exc()
-        if not interaction.response.is_done():
-            await interaction.response.send_message("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
-
-    @discord.ui.button(label="Review", style=discord.ButtonStyle.success)
-    async def review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.client_id:
-            await interaction.response.send_message("❌ Doar clientul acestui proiect poate lăsa o recenzie.", ephemeral=True)
-            return
-        if await has_reviewed_freelancer(self.ticket_id, self.client_id):
-            await interaction.response.send_message("✅ Ai lăsat deja o recenzie pentru acest proiect.", ephemeral=True)
-            return
-        modal = FreelancerReviewModal(self.ticket_id, self.freelancer_id, self.client_id)
-        modal.review_view = self
-        await interaction.response.send_modal(modal)
 
 
 async def finalize_quote_acceptance(bot: discord.Client, guild: discord.Guild, ticket: dict, quote: dict):
@@ -1772,21 +1626,6 @@ class Tickets(commands.Cog):
         self.bot.add_view(MentionPreferenceView())
         self.bot.add_view(DismissWelcomeView())
 
-        # Global command sync (bot.tree.sync() with no guild) can take up to
-        # an hour to propagate, which is exactly the "This command is
-        # outdated, please try again in a few minutes" message Discord shows
-        # for a brand new/changed command. Per-guild sync is instant, so we
-        # copy the globally-registered commands into each guild's tree and
-        # sync those - safe to run every startup. If your main bot file
-        # already does a global sync somewhere, this is redundant but
-        # harmless; remove this block if you'd rather manage sync yourself.
-        for guild in self.bot.guilds:
-            try:
-                self.bot.tree.copy_global_to(guild=guild)
-                await self.bot.tree.sync(guild=guild)
-            except discord.HTTPException:
-                log.warning("Could not sync commands for guild %s.", guild.id)
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -1838,39 +1677,6 @@ class Tickets(commands.Cog):
                     use_logo_icon=True,
                 )
             return
-
-    @app_commands.command(name="review", description="Cere clientului să lase o recenzie pentru tine, înainte de închiderea ticketului")
-    async def review(self, interaction: discord.Interaction):
-        ticket = await get_ticket_by_customer_channel(interaction.channel.id)
-        if not ticket:
-            await interaction.response.send_message("❌ Comanda se folosește în canalul unui client.", ephemeral=True)
-            return
-        if ticket["status"] != "accepted":
-            await interaction.response.send_message(
-                "❌ Comanda funcționează doar pe un proiect activ (ofertă acceptată, ticket încă deschis).",
-                ephemeral=True,
-            )
-            return
-        if interaction.user.id != ticket.get("assigned_freelancer_id"):
-            await interaction.response.send_message(
-                "❌ Doar freelancerul asignat acestui proiect poate folosi /review.", ephemeral=True
-            )
-            return
-        if await has_reviewed_freelancer(ticket["id"], ticket["owner_id"]):
-            await interaction.response.send_message("✅ Clientul a lăsat deja o recenzie pentru acest proiect.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="⭐ Lasă o recenzie",
-            description=f"Cum a fost experiența ta lucrând cu {interaction.user.mention}? "
-                         "Apasă butonul de mai jos pentru a lăsa o recenzie.",
-            color=config.COLOR_MAIN,
-        )
-        embed.set_footer(text=config.STUDIO_FOOTER)
-        await interaction.response.send_message(
-            embed=embed,
-            view=FreelancerReviewView(ticket["id"], interaction.user.id, ticket["owner_id"]),
-        )
 
     @app_commands.command(name="close-ticket", description="Închide un ticket finalizat și cere freelancerului un review despre client")
     async def close_ticket(self, interaction: discord.Interaction):
