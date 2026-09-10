@@ -1069,6 +1069,13 @@ class ReviewClientModal(discord.ui.Modal, title="Review Client"):
         self.client_id = client_id
         self.freelancer_id = freelancer_id
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        traceback.print_exc()
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ A apărut o eroare la trimiterea review-ului.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ A apărut o eroare la trimiterea review-ului.", ephemeral=True)
+
     async def on_submit(self, interaction: discord.Interaction):
         raw = str(self.rating).strip()
         if not raw.isdigit() or not (1 <= int(raw) <= 5):
@@ -1099,6 +1106,13 @@ class ReviewClientView(discord.ui.View):
         self.ticket_id = ticket_id
         self.client_id = client_id
         self.freelancer_id = freelancer_id
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        traceback.print_exc()
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ A apărut o eroare. Verifică log-ul botului.", ephemeral=True)
 
     @discord.ui.button(label="Review", style=discord.ButtonStyle.success)
     async def review_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1340,8 +1354,20 @@ async def send_ticket_welcome(channel: discord.TextChannel, member: discord.Memb
 
 async def create_quote_ticket(interaction: discord.Interaction, fields: list[tuple[str, str]]):
     """Creates two separate channels (customer / freelancer) so neither side
-    can see or interact with the other until a quote is accepted."""
+    can see or interact with the other until a quote is accepted.
+
+    Everything after channel creation is wrapped in a try/except: if any
+    step in here throws, the channels would otherwise sit there fully empty
+    forever (no info embed, no ticket row committed on some paths) and the
+    interaction itself dies silently with "This interaction failed" and no
+    error shown to the client. Instead we now log the real cause, delete the
+    orphaned channels so they don't pile up, and tell the person to retry.
+    """
     guild = interaction.guild
+    # Defensive - guarantees the tables this function touches (tickets,
+    # reviews, etc.) exist even if on_ready hasn't finished running yet.
+    await ensure_schema()
+
     ticket_category = guild.get_channel(config.TICKET_CATEGORY_ID)
     freelancer_category = guild.get_channel(FREELANCER_CATEGORY_ID)
     suffix = str(interaction.id)[-4:]
@@ -1377,72 +1403,92 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
         overwrites=freelancer_overwrites,
     )
 
-    async with get_db() as db:
-        cursor = await db.execute(
-            "INSERT INTO tickets (ticket_type, owner_id, customer_channel_id, freelancer_channel_id, status) "
-            "VALUES ('quote', ?, ?, ?, 'open')",
-            (interaction.user.id, customer_channel.id, freelancer_channel.id),
+    try:
+        async with get_db() as db:
+            cursor = await db.execute(
+                "INSERT INTO tickets (ticket_type, owner_id, customer_channel_id, freelancer_channel_id, status) "
+                "VALUES ('quote', ?, ?, ?, 'open')",
+                (interaction.user.id, customer_channel.id, freelancer_channel.id),
+            )
+            await db.commit()
+            ticket_id = cursor.lastrowid
+
+        # Embed sent to the freelancer channel, WITH full project details
+        freelancer_embed = discord.Embed(title="Information", color=discord.Color.green())
+        for name, value in fields:
+            freelancer_embed.add_field(name=name, value=value or "—", inline=False)
+        client_avg, client_review_count = await get_client_rating(interaction.user.id)
+        freelancer_embed.add_field(name="Rating", value=f"{_stars(client_avg)} ({client_review_count})", inline=False)
+        freelancer_embed.set_footer(text=config.STUDIO_FOOTER)
+        freelancer_embed.timestamp = interaction.created_at
+
+        ping = f"New quote request for {freelancer_role.mention}." if freelancer_role else "New quote request received."
+        await freelancer_channel.send(content=ping, embed=freelancer_embed, view=NewTicketActionsView())
+
+        # Any freelancer with the role can post here to chat with the client and
+        # form an opinion on the project before quoting - no first-reply claim,
+        # everyone stays able to talk until a quote is accepted.
+        chat_embed = discord.Embed(
+            title="💬 Discuție cu clientul",
+            description="Dă **reply la acest mesaj** oricând pentru a discuta cu clientul și a-ți face o idee "
+                         "despre proiect. Clientul va vedea numele și poza ta de profil la mesajele trimise astfel. "
+                         "Orice altceva scrii în canal (care nu e reply la acest mesaj) rămâne doar între freelanceri "
+                         "și nu ajunge la client. Când ești pregătit, trimite o ofertă cu butonul **Quote** de mai sus.",
+            color=discord.Color.blurple(),
         )
-        await db.commit()
-        ticket_id = cursor.lastrowid
+        chat_prompt_msg = await freelancer_channel.send(embed=chat_embed)
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE tickets SET chat_prompt_message_id = ? WHERE rowid = ?",
+                (chat_prompt_msg.id, ticket_id),
+            )
+            await db.commit()
 
-    # Embed sent to the freelancer channel, WITH full project details
-    freelancer_embed = discord.Embed(title="Information", color=discord.Color.green())
-    for name, value in fields:
-        freelancer_embed.add_field(name=name, value=value or "—", inline=False)
-    client_avg, client_review_count = await get_client_rating(interaction.user.id)
-    freelancer_embed.add_field(name="Rating", value=f"{_stars(client_avg)} ({client_review_count})", inline=False)
-    freelancer_embed.set_footer(text=config.STUDIO_FOOTER)
-    freelancer_embed.timestamp = interaction.created_at
-
-    ping = f"New quote request for {freelancer_role.mention}." if freelancer_role else "New quote request received."
-    await freelancer_channel.send(content=ping, embed=freelancer_embed, view=NewTicketActionsView())
-
-    # Any freelancer with the role can post here to chat with the client and
-    # form an opinion on the project before quoting - no first-reply claim,
-    # everyone stays able to talk until a quote is accepted.
-    chat_embed = discord.Embed(
-        title="💬 Discuție cu clientul",
-        description="Dă **reply la acest mesaj** oricând pentru a discuta cu clientul și a-ți face o idee "
-                     "despre proiect. Clientul va vedea numele și poza ta de profil la mesajele trimise astfel. "
-                     "Orice altceva scrii în canal (care nu e reply la acest mesaj) rămâne doar între freelanceri "
-                     "și nu ajunge la client. Când ești pregătit, trimite o ofertă cu butonul **Quote** de mai sus.",
-        color=discord.Color.blurple(),
-    )
-    chat_prompt_msg = await freelancer_channel.send(embed=chat_embed)
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE tickets SET chat_prompt_message_id = ? WHERE rowid = ?",
-            (chat_prompt_msg.id, ticket_id),
+        # Embed sent to the customer channel
+        customer_embed = discord.Embed(
+            title="✅ Cererea ta a fost trimisă",
+            description="Freelancerii din echipa noastră pot analiza cererea și te pot contacta direct aici "
+                         "pentru a discuta detalii și a-ți trimite oferte.",
+            color=discord.Color.green(),
         )
-        await db.commit()
+        customer_embed.set_footer(text=config.STUDIO_FOOTER)
+        customer_embed.timestamp = interaction.created_at
+        await customer_channel.send(embed=customer_embed)
 
-    # Embed sent to the customer channel
-    customer_embed = discord.Embed(
-        title="✅ Cererea ta a fost trimisă",
-        description="Freelancerii din echipa noastră pot analiza cererea și te pot contacta direct aici "
-                     "pentru a discuta detalii și a-ți trimite oferte.",
-        color=discord.Color.green(),
-    )
-    customer_embed.set_footer(text=config.STUDIO_FOOTER)
-    customer_embed.timestamp = interaction.created_at
-    await customer_channel.send(embed=customer_embed)
+        # Explains the same chat mechanic from the client's side - unlike the
+        # freelancer prompt above, no "reply to this message" is needed here:
+        # every message the client sends in this channel is relayed as-is.
+        customer_chat_embed = discord.Embed(
+            title="💬 Discuție cu freelancerii",
+            description="Poți scrie orice mesaj în acest canal pentru a discuta cu freelancerii care au acces la "
+                         "proiectul tău - nu trebuie să dai reply, orice trimiți aici ajunge la ei. Când un "
+                         "freelancer îți răspunde, vei vedea numele și poza lui de profil.",
+            color=discord.Color.blurple(),
+        )
+        await customer_channel.send(embed=customer_chat_embed)
 
-    # Explains the same chat mechanic from the client's side - unlike the
-    # freelancer prompt above, no "reply to this message" is needed here:
-    # every message the client sends in this channel is relayed as-is.
-    customer_chat_embed = discord.Embed(
-        title="💬 Discuție cu freelancerii",
-        description="Poți scrie orice mesaj în acest canal pentru a discuta cu freelancerii care au acces la "
-                     "proiectul tău - nu trebuie să dai reply, orice trimiți aici ajunge la ei. Când un "
-                     "freelancer îți răspunde, vei vedea numele și poza lui de profil.",
-        color=discord.Color.blurple(),
-    )
-    await customer_channel.send(embed=customer_chat_embed)
+        await send_ticket_welcome(customer_channel, interaction.user)
 
-    await send_ticket_welcome(customer_channel, interaction.user)
+        await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
 
-    await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
+    except Exception:
+        traceback.print_exc()
+        log.error("create_quote_ticket failed after channels were created (quote-%s/offer-%s) - deleting them.", suffix, suffix)
+        for ch in (customer_channel, freelancer_channel):
+            try:
+                await ch.delete(reason="Ticket creation failed, cleaning up empty channel")
+            except discord.HTTPException:
+                pass
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ A apărut o eroare la crearea ticketului. Te rugăm încearcă din nou sau contactează staff-ul.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "❌ A apărut o eroare la crearea ticketului. Te rugăm încearcă din nou sau contactează staff-ul.",
+                ephemeral=True,
+            )
 
 
 async def create_simple_ticket(interaction: discord.Interaction, ticket_type: str, fields: list[tuple[str, str]]):
@@ -1466,25 +1512,44 @@ async def create_simple_ticket(interaction: discord.Interaction, ticket_type: st
         overwrites=overwrites,
     )
 
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO tickets (ticket_type, owner_id, channel_id, status) VALUES (?, ?, ?, 'open')",
-            (ticket_type, interaction.user.id, channel.id),
-        )
-        await db.commit()
+    try:
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO tickets (ticket_type, owner_id, channel_id, status) VALUES (?, ?, ?, 'open')",
+                (ticket_type, interaction.user.id, channel.id),
+            )
+            await db.commit()
 
-    embed = discord.Embed(title="Information", color=discord.Color.green())
-    for name, value in fields:
-        embed.add_field(name=name, value=value or "—", inline=False)
-    embed.set_footer(text=config.STUDIO_FOOTER)
-    embed.timestamp = interaction.created_at
+        embed = discord.Embed(title="Information", color=discord.Color.green())
+        for name, value in fields:
+            embed.add_field(name=name, value=value or "—", inline=False)
+        embed.set_footer(text=config.STUDIO_FOOTER)
+        embed.timestamp = interaction.created_at
 
-    ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
-    await channel.send(content=ping, embed=embed)
+        ping = f"New ticket for {staff_role.mention}." if staff_role else "New ticket received."
+        await channel.send(content=ping, embed=embed)
 
-    await send_ticket_welcome(channel, interaction.user)
+        await send_ticket_welcome(channel, interaction.user)
 
-    await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+
+    except Exception:
+        traceback.print_exc()
+        log.error("create_simple_ticket failed after channel %s was created - deleting it.", channel.name)
+        try:
+            await channel.delete(reason="Ticket creation failed, cleaning up empty channel")
+        except discord.HTTPException:
+            pass
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ A apărut o eroare la crearea ticketului. Te rugăm încearcă din nou sau contactează staff-ul.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "❌ A apărut o eroare la crearea ticketului. Te rugăm încearcă din nou sau contactează staff-ul.",
+                ephemeral=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1634,22 +1699,31 @@ class Tickets(commands.Cog):
 
         await interaction.response.send_message("🔒 Se închide ticketul...", ephemeral=True)
 
-        async with get_db() as db:
-            await db.execute("UPDATE tickets SET status = 'closed' WHERE rowid = ?", (ticket["id"],))
-            await db.commit()
+        try:
+            async with get_db() as db:
+                await db.execute("UPDATE tickets SET status = 'closed' WHERE rowid = ?", (ticket["id"],))
+                await db.commit()
 
-        client = interaction.guild.get_member(ticket["owner_id"]) or await self.bot.fetch_user(ticket["owner_id"])
-        if client:
-            await send_client_review_request(self.bot, ticket, client)
+            client = interaction.guild.get_member(ticket["owner_id"]) or await self.bot.fetch_user(ticket["owner_id"])
+            if client:
+                await send_client_review_request(self.bot, ticket, client)
 
-        closed_embed = discord.Embed(
-            title="Ticket închis",
-            description="Acest proiect a fost marcat ca finalizat. Mulțumim pentru colaborare!",
-            color=discord.Color.green(),
-        )
-        closed_embed.set_footer(text=config.STUDIO_FOOTER)
-        await interaction.channel.send(embed=closed_embed)
-        await archive_channel(interaction.channel)
+            closed_embed = discord.Embed(
+                title="Ticket închis",
+                description="Acest proiect a fost marcat ca finalizat. Mulțumim pentru colaborare!",
+                color=discord.Color.green(),
+            )
+            closed_embed.set_footer(text=config.STUDIO_FOOTER)
+            await interaction.channel.send(embed=closed_embed)
+            await archive_channel(interaction.channel)
+        except Exception:
+            traceback.print_exc()
+            log.error("close_ticket failed for ticket %s after status was already marked closed.", ticket["id"])
+            await interaction.followup.send(
+                "⚠️ Ticketul a fost marcat ca închis, dar a apărut o eroare la trimiterea review-ului sau "
+                "la arhivare. Verifică log-ul botului.",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="freelancer-profile", description="Setează sau editează profilul tău de freelancer")
     async def freelancer_profile(self, interaction: discord.Interaction):
