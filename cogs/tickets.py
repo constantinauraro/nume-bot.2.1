@@ -18,7 +18,7 @@ TICKET_TYPES = {
 }
 
 FREELANCER_ROLE_ID = 1544135641275568158
-ARCHIVE_CATEGORY_ID = 1544151748900425829
+ARCHIVE_CATEGORY_ID = 1544151814012932256
 FREELANCER_CATEGORY_ID = getattr(config, "FREELANCER_CATEGORY_ID", config.TICKET_CATEGORY_ID)
 
 
@@ -42,7 +42,8 @@ async def ensure_schema():
                 active_relay_message_id INTEGER,
                 active_relay_side TEXT,
                 quoted_amount TEXT,
-                quoted_deadline TEXT
+                quoted_deadline TEXT,
+                chat_prompt_message_id INTEGER
             )
             """
         )
@@ -84,6 +85,7 @@ async def ensure_schema():
             "ALTER TABLE tickets ADD COLUMN active_relay_side TEXT",
             "ALTER TABLE tickets ADD COLUMN quoted_amount TEXT",
             "ALTER TABLE tickets ADD COLUMN quoted_deadline TEXT",
+            "ALTER TABLE tickets ADD COLUMN chat_prompt_message_id INTEGER",
         ):
             try:
                 await db.execute(stmt)
@@ -1017,12 +1019,19 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
     # everyone stays able to talk until a quote is accepted.
     chat_embed = discord.Embed(
         title="💬 Discuție cu clientul",
-        description="Scrie aici oricând pentru a discuta cu clientul și a-ți face o idee despre proiect. "
-                     "Mesajele tale ajung la client anonim, fără numele tău. Când ești pregătit, trimite o "
-                     "ofertă cu butonul **Quote** de mai sus.",
+        description="Dă **reply la acest mesaj** oricând pentru a discuta cu clientul și a-ți face o idee "
+                     "despre proiect. Mesajele tale ajung la client anonim, fără numele tău. Orice altceva "
+                     "scrii în canal (care nu e reply la acest mesaj) rămâne doar între freelanceri și nu "
+                     "ajunge la client. Când ești pregătit, trimite o ofertă cu butonul **Quote** de mai sus.",
         color=discord.Color.blurple(),
     )
-    await freelancer_channel.send(embed=chat_embed)
+    chat_prompt_msg = await freelancer_channel.send(embed=chat_embed)
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE tickets SET chat_prompt_message_id = ? WHERE rowid = ?",
+            (chat_prompt_msg.id, ticket_id),
+        )
+        await db.commit()
 
     # Embed sent to the customer channel, WITHOUT freelancer identity
     customer_embed = discord.Embed(
@@ -1115,10 +1124,22 @@ class Tickets(commands.Cog):
         # Freelancer discussion channel: any freelancer can talk to the
         # client to form an opinion on the project. Relayed anonymously -
         # no one freelancer claims the client by being first to reply.
+        # Only messages that are a reply to the "Discuție cu clientul" prompt
+        # are relayed, so freelancers can still talk among themselves in the
+        # same channel without that leaking to the client.
         ticket = await get_ticket_by_freelancer_channel(message.channel.id)
         if ticket:
             if ticket["status"] != "open":
                 return  # a freelancer already won this project, channel is being archived
+
+            is_reply_to_prompt = (
+                message.reference is not None
+                and ticket["chat_prompt_message_id"] is not None
+                and message.reference.message_id == ticket["chat_prompt_message_id"]
+            )
+            if not is_reply_to_prompt:
+                return  # internal freelancer chatter, not meant for the client
+
             freelancer_role = message.guild.get_role(FREELANCER_ROLE_ID)
             if freelancer_role and freelancer_role in message.author.roles:
                 customer_channel = message.guild.get_channel(ticket["customer_channel_id"])
