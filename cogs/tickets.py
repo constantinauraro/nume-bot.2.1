@@ -1771,6 +1771,21 @@ class Tickets(commands.Cog):
         self.bot.add_view(MentionPreferenceView())
         self.bot.add_view(DismissWelcomeView())
 
+        # Global command sync (bot.tree.sync() with no guild) can take up to
+        # an hour to propagate, which is exactly the "This command is
+        # outdated, please try again in a few minutes" message Discord shows
+        # for a brand new/changed command. Per-guild sync is instant, so we
+        # copy the globally-registered commands into each guild's tree and
+        # sync those - safe to run every startup. If your main bot file
+        # already does a global sync somewhere, this is redundant but
+        # harmless; remove this block if you'd rather manage sync yourself.
+        for guild in self.bot.guilds:
+            try:
+                self.bot.tree.copy_global_to(guild=guild)
+                await self.bot.tree.sync(guild=guild)
+            except discord.HTTPException:
+                log.warning("Could not sync commands for guild %s.", guild.id)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
