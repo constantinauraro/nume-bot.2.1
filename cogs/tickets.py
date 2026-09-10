@@ -430,81 +430,14 @@ class IncomingQuoteView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        async with get_db() as db:
-            await db.execute("UPDATE quotes SET status = 'accepted' WHERE id = ?", (quote["id"],))
-            await db.execute(
-                "UPDATE tickets SET status = 'accepted', assigned_freelancer_id = ?, "
-                "quoted_amount = ?, quoted_deadline = ? WHERE rowid = ?",
-                (quote["freelancer_id"], quote["amount"], quote["deadline"], ticket["id"]),
-            )
-            await db.execute(
-                "UPDATE quotes SET status = 'expired' WHERE ticket_id = ? AND id != ? AND status = 'pending'",
-                (ticket["id"], quote["id"]),
-            )
-            cursor = await db.execute(
-                "SELECT id, message_id, freelancer_id FROM quotes WHERE ticket_id = ? AND id != ? AND status = 'expired'",
-                (ticket["id"], quote["id"]),
-            )
-            other_quotes = await cursor.fetchall()
-            await db.commit()
-
-        assigned_member = interaction.guild.get_member(quote["freelancer_id"])
+        _, assigned_member = await finalize_quote_acceptance(
+            interaction.client, interaction.guild, ticket, quote
+        )
 
         await interaction.followup.send(
             f"✅ Ai acceptat oferta de la {assigned_member.mention if assigned_member else '<@' + str(quote['freelancer_id']) + '>'}! "
             "Puteți discuta direct în acest canal de acum înainte."
         )
-
-        # Grey out and disable every other pending quote card - the project
-        # is taken.
-        for oq_id, oq_message_id, oq_freelancer_id in other_quotes:
-            if not oq_message_id:
-                continue
-            try:
-                msg = await interaction.channel.fetch_message(oq_message_id)
-                view = discord.ui.View.from_message(msg)
-                for child in view.children:
-                    child.disabled = True
-                embed = msg.embeds[0] if msg.embeds else None
-                if embed:
-                    embed.color = discord.Color.greyple()
-                    embed.add_field(name="Status", value="Proiectul a fost atribuit altui freelancer.", inline=False)
-                await msg.edit(embed=embed, view=view)
-            except discord.HTTPException:
-                pass
-            oq_member = interaction.guild.get_member(oq_freelancer_id)
-            if oq_member:
-                try:
-                    await oq_member.send(
-                        f"Clientul a ales o altă ofertă pentru ticketul din {interaction.guild.name}. Mulțumim oricum!"
-                    )
-                except discord.HTTPException:
-                    pass
-
-        # Transfer the winning freelancer directly into the client's ticket -
-        # they now share this channel and talk to each other with no relay.
-        if assigned_member:
-            await interaction.channel.set_permissions(
-                assigned_member, view_channel=True, send_messages=True, attach_files=True
-            )
-        reveal_embed = discord.Embed(
-            title="🤝 Proiect asignat",
-            description=(
-                f"{assigned_member.mention if assigned_member else 'Freelancerul'} va lucra la acest proiect. "
-                "Puteți discuta direct aici de acum înainte."
-            ),
-            color=discord.Color.green(),
-        )
-        await interaction.channel.send(embed=reveal_embed)
-
-        freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"])
-        if freelancer_channel:
-            await freelancer_channel.send(
-                f"✅ Clientul a ales oferta lui "
-                f"{assigned_member.mention if assigned_member else '<@' + str(quote['freelancer_id']) + '>'}. "
-                "Acest canal se arhivează."
-            )
-            await archive_freelancer_channel(freelancer_channel)
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -648,39 +581,37 @@ class CounterofferResponseView(discord.ui.View):
             await interaction.response.send_message("❌ Această contraofertă nu mai este activă.", ephemeral=True)
             return
 
+        ticket = await get_ticket_by_id(quote["ticket_id"])
+        if not ticket or ticket["status"] != "open":
+            await interaction.response.send_message("❌ Acest ticket nu mai este activ.", ephemeral=True)
+            return
+
+        # This view is used from a DM, so interaction.guild is None here -
+        # fetch the customer channel (and its guild) via the bot client.
+        customer_channel = interaction.client.get_channel(ticket["customer_channel_id"])
+        if not customer_channel:
+            await interaction.response.send_message("❌ Nu am putut găsi canalul clientului.", ephemeral=True)
+            return
+
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
+        # The client proposed this exact amount, so the freelancer accepting
+        # it here is the final agreement - no separate client click needed.
+        # Update the quote's amount before finalizing so finalize_quote_acceptance
+        # (which trusts quote["amount"]) records and displays the right figure.
         async with get_db() as db:
             await db.execute("UPDATE quotes SET amount = ? WHERE id = ?", (self.amount, quote["id"]))
             await db.commit()
+        quote["amount"] = self.amount
+
+        await finalize_quote_acceptance(interaction.client, customer_channel.guild, ticket, quote)
 
         await interaction.followup.send(
-            "✅ Ai acceptat contraoferta. Cardul ofertei tale a fost actualizat pentru client - "
-            "poate o accepta oricând."
+            f"✅ Ai acceptat contraoferta de **${self.amount}**. Proiectul ți-a fost atribuit - poți discuta "
+            f"direct cu clientul în {customer_channel.mention} de acum înainte."
         )
-
-        ticket = await get_ticket_by_id(quote["ticket_id"])
-        if ticket:
-            # This view is used from a DM, so interaction.guild is None here -
-            # fetch the customer channel (and its guild) via the bot client.
-            customer_channel = interaction.client.get_channel(ticket["customer_channel_id"])
-            if customer_channel and quote["message_id"]:
-                try:
-                    msg = await customer_channel.fetch_message(quote["message_id"])
-                    embed = msg.embeds[0] if msg.embeds else None
-                    freelancer = customer_channel.guild.get_member(quote["freelancer_id"]) or interaction.user
-                    if embed:
-                        embed.description = (
-                            f"{freelancer.mention} has quoted **${self.amount}** (updated after counteroffer)"
-                        )
-                    await msg.edit(
-                        embed=embed,
-                        view=IncomingQuoteView(quote_id=quote["id"], amount=self.amount),
-                    )
-                except discord.HTTPException:
-                    pass
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -982,6 +913,116 @@ async def archive_freelancer_channel(channel: discord.TextChannel):
     await archive_channel(channel)
 
 
+async def finalize_quote_acceptance(bot: discord.Client, guild: discord.Guild, ticket: dict, quote: dict):
+    """Shared finalization for a quote being accepted - whether the client
+    hit Accept directly on the quote card, or a freelancer accepted the
+    client's counteroffer from DM. Either way the deal is done: the ticket
+    and quote are marked accepted, every other pending quote for this ticket
+    is expired and greyed out, the winning freelancer is added into the
+    customer channel, and the freelancer negotiation channel is archived.
+
+    `quote["amount"]` is trusted as the final agreed amount, so callers must
+    make sure it already reflects any counteroffer before calling this.
+
+    Returns (customer_channel, assigned_member) so the caller can still send
+    its own confirmation message.
+    """
+    async with get_db() as db:
+        await db.execute("UPDATE quotes SET status = 'accepted' WHERE id = ?", (quote["id"],))
+        await db.execute(
+            "UPDATE tickets SET status = 'accepted', assigned_freelancer_id = ?, "
+            "quoted_amount = ?, quoted_deadline = ? WHERE rowid = ?",
+            (quote["freelancer_id"], quote["amount"], quote["deadline"], ticket["id"]),
+        )
+        await db.execute(
+            "UPDATE quotes SET status = 'expired' WHERE ticket_id = ? AND id != ? AND status = 'pending'",
+            (ticket["id"], quote["id"]),
+        )
+        cursor = await db.execute(
+            "SELECT id, message_id, freelancer_id FROM quotes WHERE ticket_id = ? AND id != ? AND status = 'expired'",
+            (ticket["id"], quote["id"]),
+        )
+        other_quotes = await cursor.fetchall()
+        await db.commit()
+
+    customer_channel = guild.get_channel(ticket["customer_channel_id"])
+    assigned_member = guild.get_member(quote["freelancer_id"])
+
+    if customer_channel:
+        # Mark the winning quote's own card as accepted. Needed even on the
+        # path where the client already clicked Accept on this exact card
+        # (harmless re-edit), and essential on the counteroffer-from-DM path
+        # where this card was never touched by the accepting interaction.
+        if quote.get("message_id"):
+            try:
+                msg = await customer_channel.fetch_message(quote["message_id"])
+                embed = msg.embeds[0] if msg.embeds else None
+                if embed:
+                    if assigned_member:
+                        embed.description = f"{assigned_member.mention} has quoted **${quote['amount']}**"
+                    embed.color = discord.Color.green()
+                    embed.add_field(name="Status", value="✅ Ofertă acceptată.", inline=False)
+                view = discord.ui.View.from_message(msg)
+                for child in view.children:
+                    child.disabled = True
+                await msg.edit(embed=embed, view=view)
+            except discord.HTTPException:
+                pass
+
+        # Grey out and disable every other pending quote card - the project
+        # is taken.
+        for oq_id, oq_message_id, oq_freelancer_id in other_quotes:
+            if not oq_message_id:
+                continue
+            try:
+                msg = await customer_channel.fetch_message(oq_message_id)
+                view = discord.ui.View.from_message(msg)
+                for child in view.children:
+                    child.disabled = True
+                embed = msg.embeds[0] if msg.embeds else None
+                if embed:
+                    embed.color = discord.Color.greyple()
+                    embed.add_field(name="Status", value="Proiectul a fost atribuit altui freelancer.", inline=False)
+                await msg.edit(embed=embed, view=view)
+            except discord.HTTPException:
+                pass
+            oq_member = guild.get_member(oq_freelancer_id)
+            if oq_member:
+                try:
+                    await oq_member.send(
+                        f"Clientul a ales o altă ofertă pentru ticketul din {guild.name}. Mulțumim oricum!"
+                    )
+                except discord.HTTPException:
+                    pass
+
+        # Transfer the winning freelancer directly into the client's ticket -
+        # they now share this channel and talk to each other with no relay.
+        if assigned_member:
+            await customer_channel.set_permissions(
+                assigned_member, view_channel=True, send_messages=True, attach_files=True
+            )
+        reveal_embed = discord.Embed(
+            title="🤝 Proiect asignat",
+            description=(
+                f"{assigned_member.mention if assigned_member else 'Freelancerul'} va lucra la acest proiect. "
+                "Puteți discuta direct aici de acum înainte."
+            ),
+            color=discord.Color.green(),
+        )
+        await customer_channel.send(embed=reveal_embed)
+
+    freelancer_channel = guild.get_channel(ticket["freelancer_channel_id"])
+    if freelancer_channel:
+        await freelancer_channel.send(
+            f"✅ Clientul a ales oferta lui "
+            f"{assigned_member.mention if assigned_member else '<@' + str(quote['freelancer_id']) + '>'}. "
+            "Acest canal se arhivează."
+        )
+        await archive_freelancer_channel(freelancer_channel)
+
+    return customer_channel, assigned_member
+
+
 # ---------------------------------------------------------------------------
 # TICKET CREATION
 # ---------------------------------------------------------------------------
@@ -1146,39 +1187,6 @@ class Tickets(commands.Cog):
         await ensure_schema()
         self.bot.add_view(TicketPanelView())
         self.bot.add_view(NewTicketActionsView())
-        await self.restore_pending_quote_views()
-
-    async def restore_pending_quote_views(self):
-        """IncomingQuoteView isn't a persistent view (its Accept button label
-        bakes in the quoted amount), so any quote card still awaiting a
-        client response when the bot restarts is left with dead buttons -
-        clicking Accept does nothing, the freelancer channel never gets
-        archived, and the freelancer never gets merged into the ticket.
-        This is especially likely right after a counteroffer round-trip
-        (client -> freelancer DM -> client), since a restart in that window
-        silently kills the card. On every startup, re-attach a fresh,
-        working view to every quote card still pending."""
-        async with get_db() as db:
-            cursor = await db.execute(
-                "SELECT q.id, q.amount, q.message_id, t.customer_channel_id "
-                "FROM quotes q JOIN tickets t ON t.rowid = q.ticket_id "
-                "WHERE q.status = 'pending' AND t.status = 'open' AND q.message_id IS NOT NULL"
-            )
-            rows = await cursor.fetchall()
-
-        restored = 0
-        for quote_id, amount, message_id, customer_channel_id in rows:
-            channel = self.bot.get_channel(customer_channel_id)
-            if not channel:
-                continue
-            try:
-                msg = await channel.fetch_message(message_id)
-                await msg.edit(view=IncomingQuoteView(quote_id=quote_id, amount=str(amount)))
-                restored += 1
-            except discord.HTTPException:
-                log.warning("Could not restore quote view for quote %s", quote_id)
-        if restored:
-            log.info("Restored %d pending quote card(s) after restart.", restored)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
