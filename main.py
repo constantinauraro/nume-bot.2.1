@@ -19,7 +19,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 EXTENSIONS = [
     "cogs.tickets",
     "cogs.profiles",
-    # "cogs.reviews",  # dezactivat: conflict la sincronizare
+    # "cogs.reviews",  # dezactivat complet
     "cogs.levels",
     "cogs.store",
     "cogs.interactions",
@@ -30,27 +30,27 @@ EXTENSIONS = [
 async def on_ready():
     print(f"[OK] Conectat ca {bot.user} (ID: {bot.user.id})")
     try:
-        print("[INFO] Pornire curățare forțată a comenzilor vechi...")
+        print("[INFO] Pornire CURĂȚARE TOTALĂ (Globale + Guild)...")
         
-        # 1. Șterge forțat toate comenzile globale vechi din baza de date Discord
+        # 1. Șterge absolut toate comenzile globale din baza de data Discord
         bot.tree.clear(guild=None)
         await bot.tree.sync()
-        print("[OK] Toate comenzile globale vechi au fost ȘTERSE din Discord.")
+        print("[OK] Toate comenzile globale au fost ȘTERSE.")
         
-        # 2. Șterge comenzile specifice de pe serverul tău
+        # 2. Șterge comenzile locale specifice de pe serverul tău
         ID_SERVER = 1544005370383704207 
         server_obiect = discord.Object(id=ID_SERVER)
         bot.tree.clear(guild=server_obiect)
         await bot.tree.sync(guild=server_obiect)
-        print("[OK] Toate comenzile specifice de server au fost ȘTERSE din Discord.")
+        print("[OK] Toate comenzile de pe serverul 1544005370383704207 au fost ȘTERSE.")
 
-        print("[INFO] Reînregistrăm doar comenzile noi și valide...")
-        # 3. Încarcă din nou în arbore comenzile din cogs-urile active (cum e ticket.py)
+        print("[INFO] Sincronizare curată...")
+        # 3. Forțăm o singură sincronizare globală curată
         synced = await bot.tree.sync()
-        print(f"[SUCCESS] {len(synced)} comenzi slash înregistrate curat.")
+        print(f"[SUCCESS] {len(synced)} comenzi înregistrate curat la nivel Global.")
         
     except Exception as e:
-        print(f"[EROARE] Problemă la curățare/sincronizare: {e}")
+        print(f"[EROARE] Problemă la curățare: {e}")
 
 
 async def main():
