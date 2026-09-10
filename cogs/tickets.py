@@ -76,10 +76,12 @@ async def ensure_schema():
         )
         # One row per freelancer -> client review, submitted via DM after a
         # ticket is closed. A client can rack up several of these across
-        # different tickets/freelancers.
+        # different tickets/freelancers. Named "client_reviews" (not just
+        # "reviews") on purpose, to not collide with any pre-existing
+        # freelancer-reviews table elsewhere in the bot.
         await db.execute(
             """
-            CREATE TABLE IF NOT EXISTS reviews (
+            CREATE TABLE IF NOT EXISTS client_reviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticket_id INTEGER NOT NULL,
                 client_id INTEGER NOT NULL,
@@ -145,7 +147,7 @@ def _stars(rating: float) -> str:
 async def add_client_review(ticket_id: int, client_id: int, freelancer_id: int, rating: int, comment: str | None):
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO reviews (ticket_id, client_id, freelancer_id, rating, comment, created_at) "
+            "INSERT INTO client_reviews (ticket_id, client_id, freelancer_id, rating, comment, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (ticket_id, client_id, freelancer_id, rating, comment, discord.utils.utcnow().isoformat()),
         )
@@ -156,7 +158,7 @@ async def get_client_rating(client_id: int):
     """Returns (average_rating, review_count) for a client. (0.0, 0) if none yet."""
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT AVG(rating), COUNT(*) FROM reviews WHERE client_id = ?", (client_id,)
+            "SELECT AVG(rating), COUNT(*) FROM client_reviews WHERE client_id = ?", (client_id,)
         )
         avg, count = await cursor.fetchone()
         return (round(avg, 1) if avg else 0.0, count or 0)
@@ -165,7 +167,7 @@ async def get_client_rating(client_id: int):
 async def get_client_reviews(client_id: int, limit: int = 5):
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT rating, comment, freelancer_id, created_at FROM reviews "
+            "SELECT rating, comment, freelancer_id, created_at FROM client_reviews "
             "WHERE client_id = ? ORDER BY id DESC LIMIT ?",
             (client_id, limit),
         )
@@ -175,7 +177,7 @@ async def get_client_reviews(client_id: int, limit: int = 5):
 async def has_reviewed(ticket_id: int, freelancer_id: int) -> bool:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT 1 FROM reviews WHERE ticket_id = ? AND freelancer_id = ?", (ticket_id, freelancer_id)
+            "SELECT 1 FROM client_reviews WHERE ticket_id = ? AND freelancer_id = ?", (ticket_id, freelancer_id)
         )
         return await cursor.fetchone() is not None
 
