@@ -521,9 +521,14 @@ class IncomingQuoteView(discord.ui.View):
             "❌ Ai refuzat această ofertă. Poți continua discuția cu ceilalți freelanceri sau aștepta alte oferte."
         )
 
-        freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"]) if ticket else None
-        if freelancer_channel:
-            await freelancer_channel.send(f"❌ Clientul a refuzat oferta de <@{quote['freelancer_id']}>.")
+        # Told privately (DM), not in the shared freelancer channel - the
+        # other freelancers still bidding don't need to see who got declined.
+        freelancer = interaction.guild.get_member(quote["freelancer_id"])
+        if freelancer:
+            try:
+                await freelancer.send("❌ Clientul a refuzat oferta ta. Poți trimite o altă ofertă oricând.")
+            except discord.HTTPException:
+                pass
 
     @discord.ui.button(label="Counteroffer", style=discord.ButtonStyle.secondary)
     async def counteroffer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -575,29 +580,36 @@ class CounterofferModal(discord.ui.Modal, title="Trimite o contraofertă"):
             await interaction.response.send_message("❌ Această ofertă nu mai este activă.", ephemeral=True)
             return
 
-        ticket = await get_ticket_by_id(quote["ticket_id"])
-        freelancer_channel = interaction.guild.get_channel(ticket["freelancer_channel_id"]) if ticket else None
-        if not freelancer_channel:
-            await interaction.response.send_message("❌ Nu am găsit canalul freelancerilor.", ephemeral=True)
+        freelancer = interaction.guild.get_member(quote["freelancer_id"])
+        if not freelancer:
+            await interaction.response.send_message("❌ Nu am găsit acel freelancer.", ephemeral=True)
             return
 
         embed = discord.Embed(
             title="🔁 Contraofertă de la client",
-            description=f"<@{quote['freelancer_id']}>, clientul a propus **${self.amount}**"
+            description=f"Clientul a propus **${self.amount}**"
                         + (f" cu deadline **{self.deadline}**" if self.deadline.value else ""),
             color=discord.Color.orange(),
         )
         if self.message.value:
             embed.add_field(name="Mesaj:", value=f"```{self.message}```", inline=False)
-        embed.set_footer(text=config.STUDIO_FOOTER)
+        embed.set_footer(text=f"Legat de oferta ta în {interaction.guild.name}.")
         embed.timestamp = interaction.created_at
 
-        await freelancer_channel.send(
-            content=f"<@{quote['freelancer_id']}>",
-            embed=embed,
-            view=CounterofferResponseView(quote_id=quote["id"], amount=str(self.amount)),
-        )
-        await interaction.response.send_message("✅ Contraoferta ta a fost trimisă freelancerului.", ephemeral=True)
+        # Sent as a DM, privately - other freelancers competing for the same
+        # project must never see the amount being negotiated.
+        try:
+            await freelancer.send(
+                embed=embed,
+                view=CounterofferResponseView(quote_id=quote["id"], amount=str(self.amount)),
+            )
+            await interaction.response.send_message(
+                "✅ Contraoferta ta a fost trimisă freelancerului, privat.", ephemeral=True
+            )
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "❌ Nu am putut trimite contraoferta (freelancerul are DM-urile închise).", ephemeral=True
+            )
 
 
 class CounterofferResponseView(discord.ui.View):
@@ -639,12 +651,14 @@ class CounterofferResponseView(discord.ui.View):
 
         ticket = await get_ticket_by_id(quote["ticket_id"])
         if ticket:
-            customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
+            # This view is used from a DM, so interaction.guild is None here -
+            # fetch the customer channel (and its guild) via the bot client.
+            customer_channel = interaction.client.get_channel(ticket["customer_channel_id"])
             if customer_channel and quote["message_id"]:
                 try:
                     msg = await customer_channel.fetch_message(quote["message_id"])
                     embed = msg.embeds[0] if msg.embeds else None
-                    freelancer = interaction.guild.get_member(quote["freelancer_id"]) or interaction.user
+                    freelancer = customer_channel.guild.get_member(quote["freelancer_id"]) or interaction.user
                     if embed:
                         embed.description = (
                             f"{freelancer.mention} has quoted **${self.amount}** (updated after counteroffer)"
@@ -674,7 +688,7 @@ class CounterofferResponseView(discord.ui.View):
 
         ticket = await get_ticket_by_id(quote["ticket_id"])
         if ticket:
-            customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
+            customer_channel = interaction.client.get_channel(ticket["customer_channel_id"])
             if customer_channel:
                 await customer_channel.send(
                     f"❌ <@{quote['freelancer_id']}> a refuzat contraoferta ta. "
@@ -840,7 +854,7 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="Get a quote", style=discord.ButtonStyle.success, emoji="💵", custom_id="mythral_ticket_quote")
     async def quote_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        existing = await get_open_ticket(interaction.user.id)
+        existing = await get_open_ticket(interaction.guild, interaction.user.id)
         if existing:
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
@@ -848,7 +862,7 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="Apply for freelancer", style=discord.ButtonStyle.primary, emoji="💼", custom_id="mythral_ticket_apply")
     async def apply_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        existing = await get_open_ticket(interaction.user.id)
+        existing = await get_open_ticket(interaction.guild, interaction.user.id)
         if existing:
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
@@ -856,7 +870,7 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="General Support", style=discord.ButtonStyle.secondary, emoji="🎧", custom_id="mythral_ticket_support")
     async def support_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        existing = await get_open_ticket(interaction.user.id)
+        existing = await get_open_ticket(interaction.guild, interaction.user.id)
         if existing:
             await interaction.response.send_message(f"You already have an open ticket: <#{existing}>", ephemeral=True)
             return
@@ -867,15 +881,27 @@ class TicketPanelView(discord.ui.View):
 # SHARED LOGIC - lookups
 # ---------------------------------------------------------------------------
 
-async def get_open_ticket(user_id: int):
+async def get_open_ticket(guild: discord.Guild, user_id: int):
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT COALESCE(customer_channel_id, channel_id) FROM tickets "
-            "WHERE owner_id = ? AND status NOT IN ('denied', 'closed')",
+            "SELECT rowid AS id, COALESCE(customer_channel_id, channel_id) AS chan FROM tickets "
+            "WHERE owner_id = ? AND status NOT IN ('denied', 'closed') "
+            "ORDER BY rowid DESC LIMIT 1",
             (user_id,),
         )
         row = await cursor.fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+
+        ticket_id, channel_id = row
+        if channel_id and guild.get_channel(channel_id):
+            return channel_id
+
+        # The channel no longer exists (deleted manually, etc.) - don't keep
+        # blocking the user with a ticket that points nowhere.
+        await db.execute("UPDATE tickets SET status = 'closed' WHERE rowid = ?", (ticket_id,))
+        await db.commit()
+        return None
 
 
 async def _row_to_dict(cursor, row):
