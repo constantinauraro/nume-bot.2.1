@@ -2274,7 +2274,7 @@ class Tickets(commands.Cog):
 
     @app_commands.command(
         name="test-reminder-check",
-        description="[Debug] Runs one pass of the inactivity reminder check right now, instead of waiting for the daily loop",
+        description="[Debug] Runs the inactivity reminder check once, right now",
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def test_reminder_check(self, interaction: discord.Interaction):
