@@ -27,7 +27,9 @@ FREELANCER_CATEGORY_ID = getattr(config, "FREELANCER_CATEGORY_ID", config.TICKET
 # cog): a freelancer who has a quote channel open but never submits a quote
 # gets DMed every REMINDER_INTERVAL, up to MAX_REMINDERS times, then is
 # auto-removed from the channel.
-REMINDER_INTERVAL = timedelta(days=3)
+# ⚠️ TESTING VALUE - set to 1 minute so you can see the whole flow quickly.
+# Change back to `timedelta(days=3)` before going live!
+REMINDER_INTERVAL = timedelta(minutes=1)
 MAX_REMINDERS = 3
 
 # Used by the ticket-welcome message (see send_ticket_welcome below).
@@ -2029,14 +2031,24 @@ class Tickets(commands.Cog):
             return
 
         now = discord.utils.utcnow()
+        log.info("freelancer_reminder_loop: checking %d open quote ticket(s).", len(tickets))
         for ticket in tickets:
             freelancer_channel = self.bot.get_channel(ticket["freelancer_channel_id"])
             if freelancer_channel is None:
+                log.info(
+                    "freelancer_reminder_loop: ticket %s - freelancer_channel_id %s not found in cache, skipping.",
+                    ticket["id"], ticket["freelancer_channel_id"],
+                )
                 continue  # channel was deleted outside the bot - nothing to remind
 
             guild = freelancer_channel.guild
             freelancer_role = guild.get_role(FREELANCER_ROLE_ID)
             if not freelancer_role:
+                log.warning(
+                    "freelancer_reminder_loop: ticket %s - FREELANCER_ROLE_ID %s doesn't exist on guild %s "
+                    "(wrong ID for this server?), skipping.",
+                    ticket["id"], FREELANCER_ROLE_ID, guild.id,
+                )
                 continue
 
             # Re-fetch fresh so we're checking current overwrites, not a
@@ -2047,12 +2059,25 @@ class Tickets(commands.Cog):
             except discord.HTTPException:
                 fresh_channel = freelancer_channel
 
+            log.info(
+                "freelancer_reminder_loop: ticket %s - role %s has %d member(s) total.",
+                ticket["id"], freelancer_role.id, len(freelancer_role.members),
+            )
+
             for member in freelancer_role.members:
                 if not fresh_channel.permissions_for(member).view_channel:
+                    log.info(
+                        "freelancer_reminder_loop: ticket %s - %s has no view access to #%s, skipping.",
+                        ticket["id"], member, fresh_channel.name,
+                    )
                     continue  # already denied/removed, or never had access
 
                 try:
                     if await has_freelancer_quoted(ticket["id"], member.id):
+                        log.info(
+                            "freelancer_reminder_loop: ticket %s - %s already quoted, skipping.",
+                            ticket["id"], member,
+                        )
                         continue  # already interacted - sent a quote at some point
                 except Exception:
                     traceback.print_exc()
@@ -2073,13 +2098,26 @@ class Tickets(commands.Cog):
                         last_reminder_at = None
 
                 reference_time = last_reminder_at or fresh_channel.created_at
-                if now - reference_time < REMINDER_INTERVAL:
+                elapsed = now - reference_time
+                if elapsed < REMINDER_INTERVAL:
+                    log.info(
+                        "freelancer_reminder_loop: ticket %s - %s not due yet (%s elapsed, needs %s), skipping.",
+                        ticket["id"], member, elapsed, REMINDER_INTERVAL,
+                    )
                     continue  # not due yet
 
                 try:
                     if reminder_count >= MAX_REMINDERS:
+                        log.info(
+                            "freelancer_reminder_loop: ticket %s - auto-removing %s (already had %d reminders).",
+                            ticket["id"], member, reminder_count,
+                        )
                         await auto_remove_inactive_freelancer(fresh_channel, guild, member, ticket)
                     else:
+                        log.info(
+                            "freelancer_reminder_loop: ticket %s - sending reminder #%d to %s.",
+                            ticket["id"], reminder_count + 1, member,
+                        )
                         await send_inactivity_reminder(fresh_channel, member, reminder_count + 1)
                         await set_freelancer_reminder(ticket["id"], member.id, reminder_count + 1, now.isoformat())
                 except Exception:
