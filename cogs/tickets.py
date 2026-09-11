@@ -921,6 +921,34 @@ class DenyReasonSelect(discord.ui.Select):
                 )
             except discord.HTTPException:
                 pass
+            return
+
+        # If no freelancer has access to this channel anymore (everyone with
+        # the role has denied), there's nothing left to happen here - archive
+        # just this offer channel. The client's quote channel is untouched:
+        # the ticket itself isn't denied/closed, so if staff re-adds a
+        # freelancer or re-opens things, the client-side flow still works.
+        #
+        # set_permissions() only sends the HTTP edit - it does NOT update the
+        # channel's local overwrite cache (that only happens later, via a
+        # CHANNEL_UPDATE gateway event). Checking permissions_for() against
+        # the cached channel object right here would use stale data and
+        # could miss the deny we just made, so we re-fetch the channel fresh
+        # from the API first to get overwrites that include this change.
+        if freelancer_role:
+            try:
+                fresh_channel = await interaction.guild.fetch_channel(interaction.channel.id)
+            except discord.HTTPException:
+                fresh_channel = interaction.channel
+            still_has_access = any(
+                member.id != interaction.user.id and fresh_channel.permissions_for(member).view_channel
+                for member in freelancer_role.members
+            )
+            if not still_has_access:
+                await interaction.channel.send(
+                    "🔒 Toți freelancerii au refuzat acest proiect. Se arhivează canalul."
+                )
+                await archive_freelancer_channel(interaction.channel)
 
 
 class DenyReasonView(discord.ui.View):
