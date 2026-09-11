@@ -2,10 +2,11 @@ import asyncio
 import logging
 import os
 import traceback
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 from database import get_db
@@ -21,6 +22,13 @@ TICKET_TYPES = {
 FREELANCER_ROLE_ID = 1544135641275568158
 ARCHIVE_CATEGORY_ID = 1544151814012932256
 FREELANCER_CATEGORY_ID = getattr(config, "FREELANCER_CATEGORY_ID", config.TICKET_CATEGORY_ID)
+
+# Inactivity reminder system (see freelancer_reminder_loop on the Tickets
+# cog): a freelancer who has a quote channel open but never submits a quote
+# gets DMed every REMINDER_INTERVAL, up to MAX_REMINDERS times, then is
+# auto-removed from the channel.
+REMINDER_INTERVAL = timedelta(days=3)
+MAX_REMINDERS = 3
 
 # Used by the ticket-welcome message (see send_ticket_welcome below).
 STUDIO_NAME = "Mythral Creations"
@@ -135,6 +143,21 @@ async def ensure_schema():
                 comment TEXT,
                 status TEXT DEFAULT 'pending',
                 message_id INTEGER
+            )
+            """
+        )
+        # One row per (ticket, freelancer) that hasn't yet submitted a quote,
+        # tracking how many inactivity reminder DMs they've received so far
+        # and when the last one went out. Row is deleted once they quote,
+        # deny, or get auto-removed - see freelancer_reminder_loop.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS freelancer_activity (
+                ticket_id INTEGER NOT NULL,
+                freelancer_id INTEGER NOT NULL,
+                reminder_count INTEGER NOT NULL DEFAULT 0,
+                last_reminder_at TEXT,
+                PRIMARY KEY (ticket_id, freelancer_id)
             )
             """
         )
@@ -292,6 +315,72 @@ async def set_ping_pref(user_id: int, pinged: bool):
             (user_id, int(pinged)),
         )
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# FREELANCER INACTIVITY TRACKING - used by freelancer_reminder_loop below.
+# ---------------------------------------------------------------------------
+
+async def has_freelancer_quoted(ticket_id: int, freelancer_id: int) -> bool:
+    """True if this freelancer has ever submitted a quote for this ticket
+    (any status - pending, accepted, declined, expired all count as having
+    interacted), regardless of what happened to it afterward."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM quotes WHERE ticket_id = ? AND freelancer_id = ? LIMIT 1",
+            (ticket_id, freelancer_id),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def get_freelancer_activity(ticket_id: int, freelancer_id: int):
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT reminder_count, last_reminder_at FROM freelancer_activity "
+            "WHERE ticket_id = ? AND freelancer_id = ?",
+            (ticket_id, freelancer_id),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {"reminder_count": row[0], "last_reminder_at": row[1]}
+
+
+async def set_freelancer_reminder(ticket_id: int, freelancer_id: int, reminder_count: int, last_reminder_at: str):
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO freelancer_activity (ticket_id, freelancer_id, reminder_count, last_reminder_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(ticket_id, freelancer_id) DO UPDATE SET
+                reminder_count = excluded.reminder_count,
+                last_reminder_at = excluded.last_reminder_at
+            """,
+            (ticket_id, freelancer_id, reminder_count, last_reminder_at),
+        )
+        await db.commit()
+
+
+async def delete_freelancer_activity(ticket_id: int, freelancer_id: int):
+    async with get_db() as db:
+        await db.execute(
+            "DELETE FROM freelancer_activity WHERE ticket_id = ? AND freelancer_id = ?",
+            (ticket_id, freelancer_id),
+        )
+        await db.commit()
+
+
+async def get_open_quote_tickets_with_freelancer_channel():
+    """Every 'quote' ticket that's still open and has a freelancer/offer
+    channel - the only kind of ticket the reminder loop cares about (apply/
+    support tickets are single-channel, staff-facing, and out of scope)."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT rowid AS id, * FROM tickets WHERE status = 'open' AND freelancer_channel_id IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        columns = [d[0] for d in cursor.description]
+        return [dict(zip(columns, r)) for r in rows]
 
 
 class FreelancerProfileModal(discord.ui.Modal, title="Profilul tău de freelancer"):
@@ -895,24 +984,9 @@ class DenyReasonSelect(discord.ui.Select):
         # Personal opt-out only, visible only to the freelancer who denied
         # (the ephemeral message above) - no public post in the channel,
         # since other freelancers don't need to see who declined or why.
-        #
-        # Explicitly deny view/send/history (not just view_channel) so the
-        # member-level overwrite fully overrides the blanket freelancer_role
-        # overwrite that grants everyone access to this shared channel.
-        try:
-            await interaction.channel.set_permissions(
-                interaction.user,
-                view_channel=False,
-                send_messages=False,
-                read_message_history=False,
-            )
-        except discord.HTTPException:
-            traceback.print_exc()
-            log.error(
-                "Failed to remove %s's access to freelancer channel %s after Deny - "
-                "bot may be missing Manage Roles/Permissions in that channel or category.",
-                interaction.user.id, interaction.channel.id,
-            )
+        removed = await remove_freelancer_from_offer_channel(interaction.channel, interaction.guild, interaction.user)
+        await delete_freelancer_activity(ticket["id"], interaction.user.id)
+        if not removed:
             try:
                 await interaction.followup.send(
                     "⚠️ Nu am putut să-ți elimin accesul la acest canal automat (eroare de permisiuni "
@@ -921,34 +995,6 @@ class DenyReasonSelect(discord.ui.Select):
                 )
             except discord.HTTPException:
                 pass
-            return
-
-        # If no freelancer has access to this channel anymore (everyone with
-        # the role has denied), there's nothing left to happen here - archive
-        # just this offer channel. The client's quote channel is untouched:
-        # the ticket itself isn't denied/closed, so if staff re-adds a
-        # freelancer or re-opens things, the client-side flow still works.
-        #
-        # set_permissions() only sends the HTTP edit - it does NOT update the
-        # channel's local overwrite cache (that only happens later, via a
-        # CHANNEL_UPDATE gateway event). Checking permissions_for() against
-        # the cached channel object right here would use stale data and
-        # could miss the deny we just made, so we re-fetch the channel fresh
-        # from the API first to get overwrites that include this change.
-        if freelancer_role:
-            try:
-                fresh_channel = await interaction.guild.fetch_channel(interaction.channel.id)
-            except discord.HTTPException:
-                fresh_channel = interaction.channel
-            still_has_access = any(
-                member.id != interaction.user.id and fresh_channel.permissions_for(member).view_channel
-                for member in freelancer_role.members
-            )
-            if not still_has_access:
-                await interaction.channel.send(
-                    "🔒 Toți freelancerii au refuzat acest proiect. Se arhivează canalul."
-                )
-                await archive_freelancer_channel(interaction.channel)
 
 
 class DenyReasonView(discord.ui.View):
@@ -1161,6 +1207,55 @@ async def archive_freelancer_channel(channel: discord.TextChannel):
     await archive_channel(channel)
 
 
+async def remove_freelancer_from_offer_channel(
+    channel: discord.TextChannel, guild: discord.Guild, member: discord.abc.User
+) -> bool:
+    """Strips one freelancer's personal access to a shared offer channel -
+    used both by the Deny button and by the inactivity auto-removal job. If
+    nobody with the freelancer role can still see the channel afterward,
+    archives it automatically.
+
+    Returns False if the permission edit itself failed (most likely the bot
+    is missing Manage Roles/Permissions on that channel or category) - in
+    that case nothing else here has run, so the caller should surface the
+    failure rather than silently reporting success.
+    """
+    try:
+        await channel.set_permissions(
+            member, view_channel=False, send_messages=False, read_message_history=False
+        )
+    except discord.HTTPException:
+        traceback.print_exc()
+        log.error(
+            "Failed to remove %s's access to freelancer channel %s - "
+            "bot may be missing Manage Roles/Permissions in that channel or category.",
+            member.id, channel.id,
+        )
+        return False
+
+    freelancer_role = guild.get_role(FREELANCER_ROLE_ID)
+    if freelancer_role:
+        # set_permissions() only sends the HTTP edit - it doesn't update the
+        # channel's local overwrite cache (that happens later, via a
+        # CHANNEL_UPDATE gateway event) - so we re-fetch fresh from the API
+        # before checking who's left, or this check could use stale data
+        # and miss the removal we just made.
+        try:
+            fresh_channel = await guild.fetch_channel(channel.id)
+        except discord.HTTPException:
+            fresh_channel = channel
+        still_has_access = any(
+            m.id != member.id and fresh_channel.permissions_for(m).view_channel
+            for m in freelancer_role.members
+        )
+        if not still_has_access:
+            await channel.send(
+                "🔒 Niciun freelancer nu mai are acces la acest proiect. Se arhivează canalul."
+            )
+            await archive_freelancer_channel(channel)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # CLIENT REVIEWS - freelancers rate the client after a ticket is closed. The
 # request is sent by DM (mirrors the client-facing "Reviews" button on the
@@ -1267,6 +1362,62 @@ async def send_client_review_request(bot: discord.Client, ticket: dict, client: 
         await freelancer.send(embed=embed, view=ReviewClientView(ticket["id"], client.id, freelancer_id))
     except discord.HTTPException:
         log.warning("Could not DM freelancer %s a review request for ticket %s.", freelancer_id, ticket["id"])
+
+
+# ---------------------------------------------------------------------------
+# INACTIVITY REMINDERS - a freelancer who has access to an offer channel but
+# never submits a quote gets DMed every REMINDER_INTERVAL, up to
+# MAX_REMINDERS times, then is auto-removed from the channel. Driven by
+# Tickets.freelancer_reminder_loop.
+# ---------------------------------------------------------------------------
+
+async def send_inactivity_reminder(channel: discord.TextChannel, member: discord.abc.User, reminder_number: int):
+    is_final_warning = reminder_number >= MAX_REMINDERS
+    embed = discord.Embed(
+        title="🔕 Please respond to this order",
+        description=(
+            f"You've received **{reminder_number} inactivity reminder{'s' if reminder_number != 1 else ''}** "
+            "for an order and still haven't responded.\n\n"
+            "Please open the order channel and submit a **Quote** or **Deny** as soon as you can."
+            + (
+                "\n\n⚠️ If you don't respond before the next check, you'll be automatically removed from this order."
+                if is_final_warning else ""
+            )
+        ),
+        color=discord.Color.orange(),
+    )
+    embed.add_field(name="Order", value=f"#{channel.name}", inline=False)
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = discord.utils.utcnow()
+    try:
+        await member.send(embed=embed)
+    except discord.HTTPException:
+        log.warning("Could not DM freelancer %s an inactivity reminder (channel %s).", member.id, channel.id)
+
+
+async def auto_remove_inactive_freelancer(
+    channel: discord.TextChannel, guild: discord.Guild, member: discord.abc.User, ticket: dict
+):
+    removed = await remove_freelancer_from_offer_channel(channel, guild, member)
+    await delete_freelancer_activity(ticket["id"], member.id)
+    if not removed:
+        return  # bot lacks permissions here - already logged inside the helper, try again next cycle
+
+    embed = discord.Embed(
+        title="⛔ You've been automatically removed from this order",
+        description=(
+            "You didn't respond to any of the 3 inactivity reminders sent for this order, "
+            "so your access to its channel has been removed. You can still apply to other open orders."
+        ),
+        color=discord.Color.red(),
+    )
+    embed.add_field(name="Order", value=f"#{channel.name}", inline=False)
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = discord.utils.utcnow()
+    try:
+        await member.send(embed=embed)
+    except discord.HTTPException:
+        log.warning("Could not DM freelancer %s about auto-removal (channel %s).", member.id, channel.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1859,6 +2010,88 @@ async def relay_message(
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.freelancer_reminder_loop.start()
+
+    def cog_unload(self):
+        self.freelancer_reminder_loop.cancel()
+
+    @tasks.loop(hours=24)
+    async def freelancer_reminder_loop(self):
+        """Runs once a day. For every open quote ticket, checks each
+        freelancer who currently has access to the offer channel but has
+        never submitted a quote: sends a DM reminder every REMINDER_INTERVAL
+        (up to MAX_REMINDERS times), then auto-removes them from the
+        channel if they still haven't responded after that."""
+        try:
+            tickets = await get_open_quote_tickets_with_freelancer_channel()
+        except Exception:
+            traceback.print_exc()
+            return
+
+        now = discord.utils.utcnow()
+        for ticket in tickets:
+            freelancer_channel = self.bot.get_channel(ticket["freelancer_channel_id"])
+            if freelancer_channel is None:
+                continue  # channel was deleted outside the bot - nothing to remind
+
+            guild = freelancer_channel.guild
+            freelancer_role = guild.get_role(FREELANCER_ROLE_ID)
+            if not freelancer_role:
+                continue
+
+            # Re-fetch fresh so we're checking current overwrites, not a
+            # possibly-stale local cache (same reasoning as in
+            # remove_freelancer_from_offer_channel above).
+            try:
+                fresh_channel = await guild.fetch_channel(freelancer_channel.id)
+            except discord.HTTPException:
+                fresh_channel = freelancer_channel
+
+            for member in freelancer_role.members:
+                if not fresh_channel.permissions_for(member).view_channel:
+                    continue  # already denied/removed, or never had access
+
+                try:
+                    if await has_freelancer_quoted(ticket["id"], member.id):
+                        continue  # already interacted - sent a quote at some point
+                except Exception:
+                    traceback.print_exc()
+                    continue
+
+                try:
+                    activity = await get_freelancer_activity(ticket["id"], member.id)
+                except Exception:
+                    traceback.print_exc()
+                    continue
+
+                reminder_count = activity["reminder_count"] if activity else 0
+                last_reminder_at = None
+                if activity and activity["last_reminder_at"]:
+                    try:
+                        last_reminder_at = datetime.fromisoformat(activity["last_reminder_at"])
+                    except ValueError:
+                        last_reminder_at = None
+
+                reference_time = last_reminder_at or fresh_channel.created_at
+                if now - reference_time < REMINDER_INTERVAL:
+                    continue  # not due yet
+
+                try:
+                    if reminder_count >= MAX_REMINDERS:
+                        await auto_remove_inactive_freelancer(fresh_channel, guild, member, ticket)
+                    else:
+                        await send_inactivity_reminder(fresh_channel, member, reminder_count + 1)
+                        await set_freelancer_reminder(ticket["id"], member.id, reminder_count + 1, now.isoformat())
+                except Exception:
+                    traceback.print_exc()
+                    log.error(
+                        "freelancer_reminder_loop failed handling freelancer %s on ticket %s.",
+                        member.id, ticket["id"],
+                    )
+
+    @freelancer_reminder_loop.before_loop
+    async def before_freelancer_reminder_loop(self):
+        await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
     async def on_ready(self):
