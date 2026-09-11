@@ -892,22 +892,35 @@ class DenyReasonSelect(discord.ui.Select):
             ephemeral=True,
         )
 
-        embed_reason = discord.Embed(
-            title="Freelancer Declined",
-            description=f"{interaction.user.mention} a refuzat acest proiect.\n**Reason:** {reason}",
-            color=discord.Color.orange(),
-        )
-        await interaction.channel.send(embed=embed_reason)
-
-        # Personal opt-out only: this freelancer loses their own view access
-        # to the shared offer channel. A user-level overwrite is required
-        # (not just clearing it) because the blanket freelancer_role
-        # overwrite still grants view access to everyone else - an explicit
-        # deny here is what overrides that for this one member.
+        # Personal opt-out only, visible only to the freelancer who denied
+        # (the ephemeral message above) - no public post in the channel,
+        # since other freelancers don't need to see who declined or why.
+        #
+        # Explicitly deny view/send/history (not just view_channel) so the
+        # member-level overwrite fully overrides the blanket freelancer_role
+        # overwrite that grants everyone access to this shared channel.
         try:
-            await interaction.channel.set_permissions(interaction.user, view_channel=False)
+            await interaction.channel.set_permissions(
+                interaction.user,
+                view_channel=False,
+                send_messages=False,
+                read_message_history=False,
+            )
         except discord.HTTPException:
-            pass
+            traceback.print_exc()
+            log.error(
+                "Failed to remove %s's access to freelancer channel %s after Deny - "
+                "bot may be missing Manage Roles/Permissions in that channel or category.",
+                interaction.user.id, interaction.channel.id,
+            )
+            try:
+                await interaction.followup.send(
+                    "⚠️ Nu am putut să-ți elimin accesul la acest canal automat (eroare de permisiuni "
+                    "a botului). Contactează staff-ul să te scoată manual.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                pass
 
 
 class DenyReasonView(discord.ui.View):
