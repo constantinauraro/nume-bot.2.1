@@ -368,9 +368,16 @@ class QuoteModal(discord.ui.Modal, title="Get a quote"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer IMMEDIATELY - create_quote_ticket creates two channels and
+        # sends several messages, which routinely takes longer than
+        # Discord's 3-second interaction window. Without this defer, that
+        # final response would fail with an expired/unknown interaction,
+        # land in create_quote_ticket's except block, and delete the two
+        # channels it just created (looks like "the ticket disappeared").
+        await interaction.response.defer(ephemeral=True, thinking=True)
         existing = await get_open_ticket(interaction.guild, interaction.user.id)
         if existing:
-            await interaction.response.send_message(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
+            await interaction.followup.send(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
             return
         fields = [
             ("Project Type", str(self.project_type)),
@@ -400,9 +407,13 @@ class ApplyModal(discord.ui.Modal, title="Apply for freelancer"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # See QuoteModal.on_submit above for why this defer has to happen
+        # before any other awaits - create_simple_ticket does channel
+        # creation + several sends, which can outlast Discord's 3s window.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         existing = await get_open_ticket(interaction.guild, interaction.user.id)
         if existing:
-            await interaction.response.send_message(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
+            await interaction.followup.send(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
             return
         fields = [
             ("Desired Role", str(self.desired_role)),
@@ -425,9 +436,12 @@ class SupportModal(discord.ui.Modal, title="General Support"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # See QuoteModal.on_submit above for why this defer has to happen
+        # before any other awaits.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         existing = await get_open_ticket(interaction.guild, interaction.user.id)
         if existing:
-            await interaction.response.send_message(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
+            await interaction.followup.send(f"Ai deja un ticket deschis: <#{existing}>", ephemeral=True)
             return
         fields = [
             ("Subject", str(self.subject)),
@@ -1652,7 +1666,10 @@ async def create_quote_ticket(interaction: discord.Interaction, fields: list[tup
 
         await send_ticket_welcome(customer_channel, interaction.user)
 
-        await interaction.response.send_message(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
+        # interaction was already deferred back in the modal's on_submit,
+        # so the initial response is used up - this has to go through
+        # followup, not interaction.response.
+        await interaction.followup.send(f"✅ Your ticket has been created: {customer_channel.mention}", ephemeral=True)
 
     except Exception:
         traceback.print_exc()
@@ -1714,7 +1731,10 @@ async def create_simple_ticket(interaction: discord.Interaction, ticket_type: st
 
         await send_ticket_welcome(channel, interaction.user)
 
-        await interaction.response.send_message(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
+        # interaction was already deferred back in the modal's on_submit -
+        # use followup, not interaction.response, same reasoning as in
+        # create_quote_ticket above.
+        await interaction.followup.send(f"✅ Your ticket has been created: {channel.mention}", ephemeral=True)
 
     except Exception:
         traceback.print_exc()
