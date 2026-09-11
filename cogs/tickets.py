@@ -2272,6 +2272,24 @@ class Tickets(commands.Cog):
         await interaction.response.send_message("Sending ticket panel...", ephemeral=True)
         await interaction.channel.send(embed=embed, view=TicketPanelView())
 
+    @app_commands.command(
+        name="test-reminder-check",
+        description="[Debug] Runs one pass of the inactivity reminder check right now, instead of waiting for the daily loop",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def test_reminder_check(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "🔍 Rulez manual verificarea de inactivitate... vezi consola/log-ul botului pentru detalii.",
+            ephemeral=True,
+        )
+        try:
+            await self.freelancer_reminder_loop()
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send("❌ A apărut o eroare - verifică log-ul.", ephemeral=True)
+            return
+        await interaction.followup.send("✅ Verificarea manuală s-a terminat.", ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(Tickets(bot))
