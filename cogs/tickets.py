@@ -27,9 +27,7 @@ FREELANCER_CATEGORY_ID = getattr(config, "FREELANCER_CATEGORY_ID", config.TICKET
 # cog): a freelancer who has a quote channel open but never submits a quote
 # gets DMed every REMINDER_INTERVAL, up to MAX_REMINDERS times, then is
 # auto-removed from the channel.
-# ⚠️ TESTING VALUE - set to 1 minute so you can see the whole flow quickly.
-# Change back to `timedelta(days=3)` before going live!
-REMINDER_INTERVAL = timedelta(minutes=1)
+REMINDER_INTERVAL = timedelta(days=3)
 MAX_REMINDERS = 3
 
 # Used by the ticket-welcome message (see send_ticket_welcome below).
@@ -160,6 +158,19 @@ async def ensure_schema():
                 reminder_count INTEGER NOT NULL DEFAULT 0,
                 last_reminder_at TEXT,
                 PRIMARY KEY (ticket_id, freelancer_id)
+            )
+            """
+        )
+        # One row per ticket, tracking the client's inactivity reminders -
+        # mirrors freelancer_activity above but keyed only by ticket_id
+        # since there's one client per ticket. See reset_customer_activity.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS customer_activity (
+                ticket_id INTEGER PRIMARY KEY,
+                reminder_count INTEGER NOT NULL DEFAULT 0,
+                last_reminder_at TEXT,
+                last_activity_at TEXT
             )
             """
         )
@@ -383,6 +394,67 @@ async def get_open_quote_tickets_with_freelancer_channel():
         rows = await cursor.fetchall()
         columns = [d[0] for d in cursor.description]
         return [dict(zip(columns, r)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# CUSTOMER INACTIVITY TRACKING - same idea as freelancer_activity above, but
+# per-ticket (one client per ticket) instead of per-(ticket, freelancer).
+# "Inactive" covers both: never wrote anything in their own channel, and
+# received a quote but never accepted/declined it - both are captured by the
+# same last_activity_at, reset whenever the client does either.
+# ---------------------------------------------------------------------------
+
+async def get_customer_activity(ticket_id: int):
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT reminder_count, last_reminder_at, last_activity_at FROM customer_activity WHERE ticket_id = ?",
+            (ticket_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {"reminder_count": row[0], "last_reminder_at": row[1], "last_activity_at": row[2]}
+
+
+async def reset_customer_activity(ticket_id: int):
+    """Call whenever the client does anything that counts as engaging with
+    their ticket (sends a message, accepts/declines a quote) - clears the
+    reminder count and pushes the inactivity clock forward from now."""
+    now_iso = discord.utils.utcnow().isoformat()
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO customer_activity (ticket_id, reminder_count, last_reminder_at, last_activity_at)
+            VALUES (?, 0, NULL, ?)
+            ON CONFLICT(ticket_id) DO UPDATE SET
+                reminder_count = 0,
+                last_reminder_at = NULL,
+                last_activity_at = excluded.last_activity_at
+            """,
+            (ticket_id, now_iso),
+        )
+        await db.commit()
+
+
+async def set_customer_reminder(ticket_id: int, reminder_count: int, last_reminder_at: str):
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO customer_activity (ticket_id, reminder_count, last_reminder_at, last_activity_at)
+            VALUES (?, ?, ?, NULL)
+            ON CONFLICT(ticket_id) DO UPDATE SET
+                reminder_count = excluded.reminder_count,
+                last_reminder_at = excluded.last_reminder_at
+            """,
+            (ticket_id, reminder_count, last_reminder_at),
+        )
+        await db.commit()
+
+
+async def delete_customer_activity(ticket_id: int):
+    async with get_db() as db:
+        await db.execute("DELETE FROM customer_activity WHERE ticket_id = ?", (ticket_id,))
+        await db.commit()
 
 
 class FreelancerProfileModal(discord.ui.Modal, title="Profilul tău de freelancer"):
@@ -736,6 +808,7 @@ class IncomingQuoteView(discord.ui.View):
         async with get_db() as db:
             await db.execute("UPDATE quotes SET status = 'declined' WHERE id = ?", (quote["id"],))
             await db.commit()
+        await reset_customer_activity(ticket["id"])
 
         await interaction.followup.send(
             "❌ Ai refuzat această ofertă. Poți continua discuția cu ceilalți freelanceri sau aștepta alte oferte."
@@ -1422,6 +1495,81 @@ async def auto_remove_inactive_freelancer(
         log.warning("Could not DM freelancer %s about auto-removal (channel %s).", member.id, channel.id)
 
 
+async def send_customer_inactivity_reminder(client_user: discord.abc.User, channel: discord.TextChannel, reminder_number: int):
+    is_final_warning = reminder_number >= MAX_REMINDERS
+    embed = discord.Embed(
+        title="🔕 We're waiting to hear back from you",
+        description=(
+            f"You've received **{reminder_number} inactivity reminder{'s' if reminder_number != 1 else ''}** "
+            "for your order and we haven't heard from you yet.\n\n"
+            "Please open your order channel and reply, or respond to any quote you've received."
+            + (
+                "\n\n⚠️ If we don't hear from you before the next check, your order will be automatically closed."
+                if is_final_warning else ""
+            )
+        ),
+        color=discord.Color.orange(),
+    )
+    embed.add_field(name="Order", value=f"#{channel.name}", inline=False)
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    embed.timestamp = discord.utils.utcnow()
+    try:
+        await client_user.send(embed=embed)
+    except discord.HTTPException:
+        log.warning("Could not DM customer %s an inactivity reminder (channel %s).", client_user.id, channel.id)
+
+
+async def auto_close_ticket_due_to_customer_inactivity(
+    bot: discord.Client, guild: discord.Guild, ticket: dict, customer_channel: discord.TextChannel
+):
+    async with get_db() as db:
+        await db.execute("UPDATE tickets SET status = 'closed' WHERE rowid = ?", (ticket["id"],))
+        await db.commit()
+    await delete_customer_activity(ticket["id"])
+
+    embed = discord.Embed(
+        title="🔒 Ticket închis automat",
+        description=(
+            "Acest ticket a fost închis automat pentru că nu am primit niciun răspuns din partea "
+            "clientului la cele 3 remindere de inactivitate trimise."
+        ),
+        color=discord.Color.red(),
+    )
+    embed.set_footer(text=config.STUDIO_FOOTER)
+    try:
+        await customer_channel.send(embed=embed)
+    except discord.HTTPException:
+        pass
+    await archive_channel(customer_channel)
+
+    freelancer_channel = bot.get_channel(ticket["freelancer_channel_id"]) if ticket.get("freelancer_channel_id") else None
+    if freelancer_channel:
+        try:
+            await freelancer_channel.send(
+                "🔒 Acest proiect a fost închis automat - clientul nu a mai răspuns. Se arhivează canalul."
+            )
+        except discord.HTTPException:
+            pass
+        await archive_freelancer_channel(freelancer_channel)
+
+    try:
+        client_user = guild.get_member(ticket["owner_id"]) or await bot.fetch_user(ticket["owner_id"])
+        dm_embed = discord.Embed(
+            title="⛔ Your order has been automatically closed",
+            description=(
+                "You didn't respond to any of the 3 inactivity reminders sent for your order, "
+                "so it's been closed. Feel free to open a new one anytime if you're still interested."
+            ),
+            color=discord.Color.red(),
+        )
+        dm_embed.add_field(name="Order", value=f"#{customer_channel.name}", inline=False)
+        dm_embed.set_footer(text=config.STUDIO_FOOTER)
+        dm_embed.timestamp = discord.utils.utcnow()
+        await client_user.send(embed=dm_embed)
+    except discord.HTTPException:
+        log.warning("Could not DM customer %s about ticket %s auto-close.", ticket["owner_id"], ticket["id"])
+
+
 # ---------------------------------------------------------------------------
 # FREELANCER REVIEWS - the client rates the freelancer. Unlike client
 # reviews (sent by DM), this one is requested in-channel: the freelancer
@@ -1574,6 +1722,10 @@ async def finalize_quote_acceptance(bot: discord.Client, guild: discord.Guild, t
         )
         other_quotes = await cursor.fetchall()
         await db.commit()
+
+    # Ticket is no longer "open", so the reminder loop won't touch it anymore
+    # anyway - this just keeps the table tidy instead of leaving a stale row.
+    await delete_customer_activity(ticket["id"])
 
     customer_channel = guild.get_channel(ticket["customer_channel_id"])
     assigned_member = guild.get_member(quote["freelancer_id"])
@@ -2127,6 +2279,66 @@ class Tickets(commands.Cog):
                         member.id, ticket["id"],
                     )
 
+            # --- Customer side: same idea, but per-ticket (one client). ---
+            customer_channel = self.bot.get_channel(ticket["customer_channel_id"]) if ticket.get("customer_channel_id") else None
+            if customer_channel is None:
+                log.info(
+                    "freelancer_reminder_loop: ticket %s - customer_channel_id %s not found in cache, skipping customer check.",
+                    ticket["id"], ticket.get("customer_channel_id"),
+                )
+                continue
+
+            try:
+                activity = await get_customer_activity(ticket["id"])
+            except Exception:
+                traceback.print_exc()
+                continue
+
+            reminder_count = activity["reminder_count"] if activity else 0
+            last_reminder_at = None
+            last_activity_at = None
+            if activity and activity["last_reminder_at"]:
+                try:
+                    last_reminder_at = datetime.fromisoformat(activity["last_reminder_at"])
+                except ValueError:
+                    last_reminder_at = None
+            if activity and activity["last_activity_at"]:
+                try:
+                    last_activity_at = datetime.fromisoformat(activity["last_activity_at"])
+                except ValueError:
+                    last_activity_at = None
+
+            reference_time = last_reminder_at or last_activity_at or customer_channel.created_at
+            elapsed = now - reference_time
+            if elapsed < REMINDER_INTERVAL:
+                log.info(
+                    "freelancer_reminder_loop: ticket %s - customer not due yet (%s elapsed, needs %s), skipping.",
+                    ticket["id"], elapsed, REMINDER_INTERVAL,
+                )
+                continue
+
+            try:
+                if reminder_count >= MAX_REMINDERS:
+                    log.info(
+                        "freelancer_reminder_loop: ticket %s - auto-closing (customer inactive, already had %d reminders).",
+                        ticket["id"], reminder_count,
+                    )
+                    await auto_close_ticket_due_to_customer_inactivity(self.bot, guild, ticket, customer_channel)
+                else:
+                    client_user = guild.get_member(ticket["owner_id"]) or await self.bot.fetch_user(ticket["owner_id"])
+                    log.info(
+                        "freelancer_reminder_loop: ticket %s - sending customer reminder #%d.",
+                        ticket["id"], reminder_count + 1,
+                    )
+                    await send_customer_inactivity_reminder(client_user, customer_channel, reminder_count + 1)
+                    await set_customer_reminder(ticket["id"], reminder_count + 1, now.isoformat())
+            except Exception:
+                traceback.print_exc()
+                log.error(
+                    "freelancer_reminder_loop failed handling customer for ticket %s.",
+                    ticket["id"],
+                )
+
     @freelancer_reminder_loop.before_loop
     async def before_freelancer_reminder_loop(self):
         await self.bot.wait_until_ready()
@@ -2197,6 +2409,7 @@ class Tickets(commands.Cog):
         # very channel, so nothing needs relaying anymore.
         ticket = await get_ticket_by_customer_channel(message.channel.id)
         if ticket and ticket["status"] == "open" and message.author.id == ticket["owner_id"]:
+            await reset_customer_activity(ticket["id"])
             freelancer_channel = message.guild.get_channel(ticket["freelancer_channel_id"])
             if freelancer_channel:
                 await relay_message(
@@ -2266,6 +2479,7 @@ class Tickets(commands.Cog):
             async with get_db() as db:
                 await db.execute("UPDATE tickets SET status = 'closed' WHERE rowid = ?", (ticket["id"],))
                 await db.commit()
+            await delete_customer_activity(ticket["id"])
 
             client = interaction.guild.get_member(ticket["owner_id"]) or await self.bot.fetch_user(ticket["owner_id"])
             if client:
