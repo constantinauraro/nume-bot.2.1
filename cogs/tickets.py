@@ -844,7 +844,10 @@ class MessageModal(discord.ui.Modal, title="Trimite un mesaj"):
 
 
 # ---------------------------------------------------------------------------
-# DENY REASONS DROPDOWN (freelancer team rejects the whole project)
+# DENY REASONS DROPDOWN (a single freelancer personally opts out of a
+# project). This only removes that freelancer's own access to the shared
+# offer channel - it never closes the ticket or touches the client's
+# channel, since other freelancers may still want to quote.
 # ---------------------------------------------------------------------------
 
 class DenyReasonSelect(discord.ui.Select):
@@ -869,30 +872,28 @@ class DenyReasonSelect(discord.ui.Select):
             return
 
         reason = self.values[0]
-        await interaction.response.send_message(f"🔒 Ticket denied. Reason: **{reason}**. Archiving...", ephemeral=True)
-
-        async with get_db() as db:
-            await db.execute("UPDATE tickets SET status = 'denied' WHERE rowid = ?", (ticket["id"],))
-            await db.commit()
+        await interaction.response.send_message(
+            f"🔒 Ai refuzat acest proiect. Motiv: **{reason}**. Nu mai ai acces la acest canal, "
+            "dar ceilalți freelanceri pot în continuare oferta.",
+            ephemeral=True,
+        )
 
         embed_reason = discord.Embed(
-            title="Ticket Denied",
-            description=f"This ticket has been rejected by the freelancers.\n**Reason:** {reason}",
-            color=discord.Color.red(),
+            title="Freelancer Declined",
+            description=f"{interaction.user.mention} a refuzat acest proiect.\n**Reason:** {reason}",
+            color=discord.Color.orange(),
         )
         await interaction.channel.send(embed=embed_reason)
-        await archive_freelancer_channel(interaction.channel)
 
-        customer_channel = interaction.guild.get_channel(ticket["customer_channel_id"])
-        if customer_channel:
-            customer_embed = discord.Embed(
-                title="Ticket închis",
-                description="Din păcate niciun freelancer nu poate prelua acest proiect momentan.\n"
-                            f"**Motiv:** {reason}",
-                color=discord.Color.red(),
-            )
-            await customer_channel.send(embed=customer_embed)
-            await archive_channel(customer_channel)
+        # Personal opt-out only: this freelancer loses their own view access
+        # to the shared offer channel. A user-level overwrite is required
+        # (not just clearing it) because the blanket freelancer_role
+        # overwrite still grants view access to everyone else - an explicit
+        # deny here is what overrides that for this one member.
+        try:
+            await interaction.channel.set_permissions(interaction.user, view_channel=False)
+        except discord.HTTPException:
+            pass
 
 
 class DenyReasonView(discord.ui.View):
